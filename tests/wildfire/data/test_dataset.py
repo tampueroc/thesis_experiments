@@ -102,6 +102,35 @@ def test_dataset_static_feature_encoding_missing_and_unk() -> None:
     assert np.array_equal(g_cat, np.array([0, 3], dtype=np.int64))
 
 
+def test_dataset_fuel_lookup_mapping_for_categorical_feature() -> None:
+    z = np.arange(6 * 2, dtype=np.float32).reshape(6, 2)
+    w = np.arange(6 * 2, dtype=np.float32).reshape(6, 2)
+
+    ds_known = WildfireSequenceDataset(
+        embeddings_source={"fire_a": z},
+        weather_source={"fire_a": w},
+        static_source={"fire_a": np.array([101.0, 0.5], dtype=np.float32)},
+        history=5,
+        return_tensors=False,
+        static_categorical_indices=(0,),
+    )
+    ds_unknown = WildfireSequenceDataset(
+        embeddings_source={"fire_a": z},
+        weather_source={"fire_a": w},
+        static_source={"fire_a": np.array([9999.0, 0.5], dtype=np.float32)},
+        history=5,
+        return_tensors=False,
+        static_categorical_indices=(0,),
+    )
+
+    known_cat = np.asarray(ds_known[0]["g_cat"], dtype=np.int64)
+    unknown_cat = np.asarray(ds_unknown[0]["g_cat"], dtype=np.int64)
+    assert known_cat.shape == (1,)
+    assert unknown_cat.shape == (1,)
+    assert int(known_cat[0]) > 0
+    assert int(unknown_cat[0]) == 0
+
+
 def test_dataset_raises_for_missing_weather() -> None:
     z = np.arange(6 * 4, dtype=np.float32).reshape(6, 4)
     g = np.array([0.1, 0.2], dtype=np.float32)
