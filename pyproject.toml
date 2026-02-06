@@ -13,8 +13,11 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "matplotlib>=3.10.8",
+    "pandas>=3.0.0",
     "pytest>=9.0.2",
     "ruff>=0.15.0",
+    "seaborn>=0.13.2",
     "ty>=0.0.15",
 ]
 
