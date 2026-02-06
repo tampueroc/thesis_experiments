@@ -42,6 +42,13 @@ FEATURE_MEANINGS: dict[str, dict[str, str]] = {
     "paleo": {"meaning": "paleo/soil-geology class", "expected_type": "categorical"},
 }
 
+BOUNDARY_FLAG_FEATURES = {
+    "touches_top",
+    "touches_bottom",
+    "touches_left",
+    "touches_right",
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -170,8 +177,14 @@ def save_categorical_counts(
     summary_df: pd.DataFrame,
     output_path: Path,
     top_k: int,
+    exclude_features: set[str] | None = None,
 ) -> None:
-    cats = summary_df[summary_df["likely_categorical"]]["feature"].tolist()
+    excluded = exclude_features or set()
+    cats = [
+        feature
+        for feature in summary_df[summary_df["likely_categorical"]]["feature"].tolist()
+        if feature not in excluded
+    ]
     rows: list[dict[str, object]] = []
     for feature in cats:
         vc = df[feature].value_counts(dropna=False).head(top_k)
@@ -186,6 +199,29 @@ def save_categorical_counts(
     pd.DataFrame(rows).to_csv(output_path, index=False)
 
 
+def save_boundary_flag_plot(df: pd.DataFrame, output_path: Path) -> None:
+    available_flags = [f for f in BOUNDARY_FLAG_FEATURES if f in df.columns]
+    if not available_flags:
+        return
+    rates = (
+        df[available_flags]
+        .mean()
+        .sort_values(ascending=False)
+        .reset_index(name="rate")
+        .rename(columns={"index": "feature"})
+    )
+    plt.figure(figsize=(7, 4))
+    sns.barplot(data=rates, x="feature", y="rate", color="#457b9d")
+    plt.title("Boundary Contact Rates")
+    plt.xlabel("Boundary flag")
+    plt.ylabel("Rate")
+    plt.ylim(0, 1)
+    plt.xticks(rotation=20, ha="right")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=180)
+    plt.close()
+
+
 def main() -> None:
     args = parse_args()
     indices_path = args.landscape_dir / "indices.json"
@@ -197,28 +233,43 @@ def main() -> None:
 
     df = build_feature_frame(indices_path)
     summary_df = detect_categorical_columns(df)
-    long_df = df.drop(columns=["fire_id"]).melt(var_name="feature", value_name="value")
+    categorical_summary = summary_df[summary_df["likely_categorical"]].copy()
+    categorical_summary = categorical_summary[
+        ~categorical_summary["feature"].isin(BOUNDARY_FLAG_FEATURES)
+    ]
+    continuous_features = summary_df[~summary_df["likely_categorical"]]["feature"].tolist()
+    long_df = df[continuous_features].melt(var_name="feature", value_name="value")
 
     summary_path = out_dir / "g_feature_summary.csv"
     features_path = out_dir / "g_feature_table.csv"
     meanings_path = out_dir / "static_channel_meanings.csv"
     categories_path = out_dir / "g_categorical_candidates.csv"
     cat_counts_path = out_dir / "g_categorical_value_counts.csv"
+    boundary_plot_path = out_dir / "g_boundary_flag_rates.png"
     ranges_plot_path = out_dir / "g_feature_ranges.png"
     dist_plot_path = out_dir / "g_feature_distributions.png"
 
     df.to_csv(features_path, index=False)
     summary_df.to_csv(summary_path, index=False)
     pd.DataFrame(STATIC_CHANNEL_MEANINGS).to_csv(meanings_path, index=False)
-    summary_df[summary_df["likely_categorical"]].to_csv(categories_path, index=False)
-    save_categorical_counts(df, summary_df, cat_counts_path, top_k=args.top_categorical_values)
-    save_range_plot(long_df, ranges_plot_path)
-    save_distribution_plot(long_df, dist_plot_path)
+    categorical_summary.to_csv(categories_path, index=False)
+    save_categorical_counts(
+        df,
+        summary_df,
+        cat_counts_path,
+        top_k=args.top_categorical_values,
+        exclude_features=BOUNDARY_FLAG_FEATURES,
+    )
+    save_boundary_flag_plot(df, boundary_plot_path)
+    if not long_df.empty:
+        save_range_plot(long_df, ranges_plot_path)
+        save_distribution_plot(long_df, dist_plot_path)
 
     print(f"[ok] rows={len(df)}")
     print(f"[ok] summary={summary_path}")
     print(f"[ok] meanings={meanings_path}")
     print(f"[ok] categories={categories_path}")
+    print(f"[ok] boundary_plot={boundary_plot_path}")
     print(f"[ok] range_plot={ranges_plot_path}")
     print(f"[ok] dist_plot={dist_plot_path}")
 
