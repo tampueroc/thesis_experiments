@@ -71,6 +71,13 @@ def parse_args() -> argparse.Namespace:
         help="Expected number of timesteps per fire. Defaults to 6.",
     )
     parser.add_argument(
+        "--all-frames",
+        "--all-farmes",
+        dest="all_frames",
+        action="store_true",
+        help="Embed all available frame indices per sequence.",
+    )
+    parser.add_argument(
         "--input-size",
         type=int,
         default=400,
@@ -201,10 +208,13 @@ def load_mask_as_rgb(image_path: Path) -> Image.Image:
 
 
 def select_fire_indices(
-    fire_frames: dict[int, Path], expected_timesteps: int, strict: bool
+    fire_frames: dict[int, Path], expected_timesteps: int, strict: bool, all_frames: bool
 ) -> list[int]:
-    expected = list(range(expected_timesteps))
     available = set(fire_frames.keys())
+    if all_frames:
+        return sorted(available)
+
+    expected = list(range(expected_timesteps))
     selected = [idx for idx in expected if idx in available]
     if strict and len(selected) != expected_timesteps:
         missing = [idx for idx in expected if idx not in available]
@@ -240,13 +250,17 @@ def process_fire(
     dtype: torch.dtype,
     expected_timesteps: int,
     strict: bool,
+    all_frames: bool,
     batch_size: int,
     overwrite: bool,
     skip_embedding: bool,
     mock_embedding_dim: int,
 ) -> dict[str, int | str]:
     fire_indices = select_fire_indices(
-        fire_frames=fire.fire_frames, expected_timesteps=expected_timesteps, strict=strict
+        fire_frames=fire.fire_frames,
+        expected_timesteps=expected_timesteps,
+        strict=strict,
+        all_frames=all_frames,
     )
     if not fire_indices:
         raise ValueError("No usable timesteps found.")
@@ -371,6 +385,7 @@ def main() -> None:
                 dtype=dtype,
                 expected_timesteps=args.expected_timesteps,
                 strict=args.strict,
+                all_frames=args.all_frames,
                 batch_size=args.batch_size,
                 overwrite=args.overwrite,
                 skip_embedding=args.skip_embedding,
@@ -422,11 +437,12 @@ def main() -> None:
         "model_name": args.model_name,
         "model_slug": model_slug(args.model_name),
         "input_size": args.input_size,
-        "num_frames": args.expected_timesteps,
+        "num_frames": "all_available" if args.all_frames else args.expected_timesteps,
         "embedding_dim": embedding_dim,
         "modalities": list(modality_summaries.keys()),
         "device": str(device),
         "skip_embedding": args.skip_embedding,
+        "all_frames": args.all_frames,
     }
     meta = upsert_model_meta(meta, model_entry)
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
