@@ -3,11 +3,9 @@ from __future__ import annotations
 import os
 import json
 from pathlib import Path
-from typing import cast
 
 import numpy as np
 import pytest
-import torch
 
 from wildfire.data.dataset import WildfireSequenceDataset
 from wildfire.data.real_data import build_sources, choose_timestamp, parse_sequence_num
@@ -56,10 +54,10 @@ def test_dataset_shapes_on_real_data() -> None:
 
     assert len(dataset) > 0
     sample = dataset[0]
-    z_in = cast(torch.Tensor, sample["z_in"])
-    z_target = cast(torch.Tensor, sample["z_target"])
-    w_in = cast(torch.Tensor, sample["w_in"])
-    g = cast(torch.Tensor, sample["g"])
+    z_in = np.asarray(sample["z_in"])
+    z_target = np.asarray(sample["z_target"])
+    w_in = np.asarray(sample["w_in"])
+    g = np.asarray(sample["g"])
     assert tuple(z_in.shape)[0] == 5
     assert len(z_target.shape) == 1
     assert tuple(w_in.shape)[0] == 5
@@ -118,3 +116,67 @@ def test_static_vectors_align_with_precomputed_sequence_g() -> None:
         checked += 1
 
     assert checked > 0
+
+
+@pytest.mark.real_data
+def test_dataset_sample_g_matches_manual_static_fetch() -> None:
+    if os.getenv("RELELA_ONLY_TEST") != "1":
+        pytest.skip("set RELELA_ONLY_TEST=1 to run SSH real-data test")
+
+    embeddings_root = Path("/home/tampuero/data/thesis_data/embeddings")
+    landscape_dir = Path("/home/tampuero/data/thesis_data/landscape")
+    values_path = landscape_dir / "sequence_static_g_values.npy"
+    keys_path = landscape_dir / "sequence_static_g_keys.json"
+    if not embeddings_root.exists() or not landscape_dir.exists():
+        pytest.skip("real_data paths not available on this machine")
+    if not values_path.exists() or not keys_path.exists():
+        pytest.skip("precomputed sequence static g files are not available")
+
+    timestamp = choose_timestamp(embeddings_root, "")
+    modality_dir = embeddings_root / timestamp / "fire_frames"
+    model_dir = _resolve_available_model_dir(modality_dir)
+    if model_dir is None:
+        pytest.skip(f"no supported model dir found under: {modality_dir}")
+    assert model_dir is not None
+
+    z_by_fire, w_by_fire, g_by_fire = build_sources(
+        model_dir=model_dir,
+        landscape_dir=landscape_dir,
+        max_sequences=32,
+    )
+    dataset = WildfireSequenceDataset(
+        embeddings_source=z_by_fire,
+        weather_source=w_by_fire,
+        static_source=g_by_fire,
+        history=5,
+        return_tensors=False,
+    )
+    if len(dataset) == 0:
+        pytest.skip("dataset has no samples for this real-data slice")
+
+    g_values = np.asarray(np.load(values_path), dtype=np.float32)
+    alias_to_row = {str(k): int(v) for k, v in json.loads(keys_path.read_text(encoding="utf-8")).items()}
+
+    checked_fire_ids: set[str] = set()
+    for idx in range(len(dataset)):
+        sample = dataset[idx]
+        fire_id = str(sample["fire_id"])
+        if fire_id in checked_fire_ids:
+            continue
+        sequence_num = parse_sequence_num(fire_id)
+        aliases = [
+            fire_id,
+            f"sequence_{sequence_num:03d}",
+            f"sequence_{sequence_num:04d}",
+            f"sequence_{sequence_num:05d}",
+            str(sequence_num),
+        ]
+        row_idx = next((alias_to_row[a] for a in aliases if a in alias_to_row), None)
+        assert row_idx is not None, f"missing alias mapping for sequence_id={fire_id}"
+        expected = np.asarray(g_values[row_idx], dtype=np.float32)
+        actual = np.asarray(sample["g"], dtype=np.float32)
+        assert actual.shape == expected.shape, f"shape mismatch for sequence_id={fire_id}"
+        assert np.allclose(actual, expected, equal_nan=True), f"dataset g mismatch for sequence_id={fire_id}"
+        checked_fire_ids.add(fire_id)
+
+    assert len(checked_fire_ids) > 0
