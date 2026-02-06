@@ -13,6 +13,18 @@ from wildfire.data.dataset import WildfireSequenceDataset
 from wildfire.data.real_data import build_sources, choose_timestamp, parse_sequence_num
 
 
+def _resolve_available_model_dir(base_modality_dir: Path) -> Path | None:
+    preferred = [
+        "facebook__dinov2-small",
+        "facebook__dinov2-large",
+    ]
+    for slug in preferred:
+        candidate = base_modality_dir / slug
+        if candidate.exists():
+            return candidate
+    return None
+
+
 @pytest.mark.real_data
 def test_dataset_shapes_on_real_data() -> None:
     if os.getenv("RELELA_ONLY_TEST") != "1":
@@ -24,9 +36,11 @@ def test_dataset_shapes_on_real_data() -> None:
         pytest.skip("real_data paths not available on this machine")
 
     timestamp = choose_timestamp(embeddings_root, "")
-    model_dir = embeddings_root / timestamp / "fire_frames" / "facebook__dinov2-small"
-    if not model_dir.exists():
-        pytest.skip(f"model dir missing: {model_dir}")
+    modality_dir = embeddings_root / timestamp / "fire_frames"
+    model_dir = _resolve_available_model_dir(modality_dir)
+    if model_dir is None:
+        pytest.skip(f"no supported model dir found under: {modality_dir}")
+    assert model_dir is not None
 
     z_by_fire, w_by_fire, g_by_fire = build_sources(
         model_dir=model_dir,
@@ -67,9 +81,11 @@ def test_static_vectors_align_with_precomputed_sequence_g() -> None:
         pytest.skip("precomputed sequence static g files are not available")
 
     timestamp = choose_timestamp(embeddings_root, "")
-    model_dir = embeddings_root / timestamp / "fire_frames" / "facebook__dinov2-large"
-    if not model_dir.exists():
-        pytest.skip(f"model dir missing: {model_dir}")
+    modality_dir = embeddings_root / timestamp / "fire_frames"
+    model_dir = _resolve_available_model_dir(modality_dir)
+    if model_dir is None:
+        pytest.skip(f"no supported model dir found under: {modality_dir}")
+    assert model_dir is not None
 
     z_by_fire, _, g_by_fire = build_sources(
         model_dir=model_dir,
