@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 import pytest
+import torch
 
 from wildfire.data.dataset import WildfireSequenceDataset
 
@@ -20,11 +23,15 @@ def test_dataset_single_sample_tensor_shapes() -> None:
 
     assert len(ds) == 1
     sample = ds[0]
+    z_in = cast(torch.Tensor, sample["z_in"])
+    z_target = cast(torch.Tensor, sample["z_target"])
+    w_in = cast(torch.Tensor, sample["w_in"])
+    g_t = cast(torch.Tensor, sample["g"])
     assert sample["fire_id"] == "fire_a"
-    assert tuple(sample["z_in"].shape) == (5, 4)
-    assert tuple(sample["z_target"].shape) == (4,)
-    assert tuple(sample["w_in"].shape) == (5, 3)
-    assert tuple(sample["g"].shape) == (3,)
+    assert tuple(z_in.shape) == (5, 4)
+    assert tuple(z_target.shape) == (4,)
+    assert tuple(w_in.shape) == (5, 3)
+    assert tuple(g_t.shape) == (3,)
 
 
 def test_dataset_multiple_windows_with_stride() -> None:
@@ -44,8 +51,10 @@ def test_dataset_multiple_windows_with_stride() -> None:
     assert len(ds) == 2
     s0 = ds[0]
     s1 = ds[1]
-    assert np.allclose(s0["z_target"].numpy(), z[5])
-    assert np.allclose(s1["z_target"].numpy(), z[7])
+    s0_target = cast(torch.Tensor, s0["z_target"])
+    s1_target = cast(torch.Tensor, s1["z_target"])
+    assert np.allclose(s0_target.numpy(), z[5])
+    assert np.allclose(s1_target.numpy(), z[7])
 
 
 def test_dataset_return_numpy() -> None:

@@ -6,7 +6,6 @@ from typing import Mapping
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
 
 
 ArrayMap = Mapping[str, np.ndarray]
@@ -20,7 +19,7 @@ class _SampleIndex:
     target_idx: int
 
 
-class WildfireSequenceDataset(Dataset[dict[str, object]]):
+class WildfireSequenceDataset:
     """Builds temporal training samples from precomputed per-sequence embeddings.
 
     Each sample has:
@@ -71,7 +70,9 @@ class WildfireSequenceDataset(Dataset[dict[str, object]]):
     def __len__(self) -> int:
         return len(self._sample_index)
 
-    def __getitem__(self, idx: int) -> dict[str, object]:
+    def __getitem__(self, idx: object) -> dict[str, object]:
+        if not isinstance(idx, int):
+            raise TypeError(f"index must be int, got {type(idx).__name__}")
         item = self._sample_index[idx]
         z = self._z_by_fire[item.fire_id]
         w = self._w_by_fire[item.fire_id]
@@ -130,7 +131,9 @@ class WildfireSequenceDataset(Dataset[dict[str, object]]):
     @staticmethod
     def _load_per_fire_arrays(source: SourceLike, expected_ndim: int) -> dict[str, np.ndarray]:
         if isinstance(source, Mapping):
-            loaded = {k: np.asarray(v, dtype=np.float32) for k, v in source.items()}
+            loaded: dict[str, np.ndarray] = {
+                str(k): np.asarray(v, dtype=np.float32) for k, v in source.items()
+            }
             WildfireSequenceDataset._validate_ndim(loaded, expected_ndim=expected_ndim)
             return loaded
 

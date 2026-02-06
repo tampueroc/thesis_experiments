@@ -29,3 +29,10 @@ If either command cannot be run due to environment or permission constraints, re
    - verify commit hash alignment (`git rev-parse HEAD` on both sides).
 5. Run end-to-end heavy checks on SSH with real data using `uv`.
 6. Delivery is closed only after local + SSH validations pass.
+
+## SSH-Only Real-Data Tests
+
+- Real-data pytest cases are gated by `RELELA_ONLY_TEST=1`.
+- Default local runs should keep these tests skipped.
+- Run on SSH machine:
+  - `RELELA_ONLY_TEST=1 /home/tampuero/.local/bin/uv run --with pytest pytest -q -m real_data`
