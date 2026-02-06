@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import cast
 
-import torch
+import numpy as np
 from wildfire.data.dataset import WildfireSequenceDataset
 from wildfire.data.real_data import build_sources, choose_timestamp
 
@@ -78,10 +77,12 @@ def main() -> None:
         raise RuntimeError("dataset has zero samples after history windowing")
 
     sample = dataset[0]
-    z_in = cast(torch.Tensor, sample["z_in"])
-    z_target = cast(torch.Tensor, sample["z_target"])
-    w_in = cast(torch.Tensor, sample["w_in"])
-    g = cast(torch.Tensor, sample["g"])
+    z_in = np.asarray(sample["z_in"])
+    z_target = np.asarray(sample["z_target"])
+    w_in = np.asarray(sample["w_in"])
+    g_num = np.asarray(sample["g_num"])
+    g_num_mask = np.asarray(sample["g_num_mask"])
+    g_cat = np.asarray(sample["g_cat"])
     print(f"[ok] timestamp={timestamp}")
     print(f"[ok] model_dir={model_dir}")
     print(f"[ok] sequences_loaded={len(z_by_fire)}")
@@ -90,7 +91,9 @@ def main() -> None:
     print(f"[ok] z_in shape={tuple(z_in.shape)}")
     print(f"[ok] z_target shape={tuple(z_target.shape)}")
     print(f"[ok] w_in shape={tuple(w_in.shape)}")
-    print(f"[ok] g shape={tuple(g.shape)}")
+    print(f"[ok] g_num shape={tuple(g_num.shape)}")
+    print(f"[ok] g_num_mask shape={tuple(g_num_mask.shape)}")
+    print(f"[ok] g_cat shape={tuple(g_cat.shape)}")
 
 
 if __name__ == "__main__":

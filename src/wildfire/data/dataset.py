@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping, cast
 
 import numpy as np
 import torch
@@ -10,6 +10,10 @@ import torch
 
 ArrayMap = Mapping[str, np.ndarray]
 SourceLike = str | Path | ArrayMap
+
+
+def _torch_from_numpy(array: np.ndarray) -> Any:
+    return cast(Any, torch).from_numpy(array)
 
 
 @dataclass(frozen=True)
@@ -26,7 +30,9 @@ class WildfireSequenceDataset:
     - z_in: (history, E)
     - z_target: (E,)
     - w_in: (history, d_w)
-    - g: (d_g,)
+    - g_num: (n_num,) with missing replaced by 0
+    - g_num_mask: (n_num,) where 1=valid and 0=missing
+    - g_cat: (n_cat,) categorical indices including UNK=0
     - fire_id: str
     """
 
@@ -38,6 +44,9 @@ class WildfireSequenceDataset:
         history: int = 5,
         stride: int = 1,
         return_tensors: bool = True,
+        static_categorical_indices: tuple[int, ...] = (0,),
+        static_missing_value: float = -1.0,
+        categorical_unknown_index: int = 0,
     ) -> None:
         if history < 1:
             raise ValueError("history must be >= 1")
@@ -47,6 +56,11 @@ class WildfireSequenceDataset:
         self._history = history
         self._stride = stride
         self._return_tensors = return_tensors
+        self._static_categorical_indices = tuple(sorted(set(static_categorical_indices)))
+        self._static_missing_value = float(static_missing_value)
+        if categorical_unknown_index < 0:
+            raise ValueError("categorical_unknown_index must be >= 0")
+        self._categorical_unknown_index = int(categorical_unknown_index)
 
         self._z_by_fire = self._load_per_fire_arrays(embeddings_source, expected_ndim=2)
         self._w_by_fire = self._load_per_fire_arrays(weather_source, expected_ndim=2)
@@ -81,13 +95,16 @@ class WildfireSequenceDataset:
         z_in = z[item.start_idx : item.target_idx]
         z_target = z[item.target_idx]
         w_in = w[item.start_idx : item.target_idx]
+        g_num, g_num_mask, g_cat = self._encode_static_features(g)
 
         if self._return_tensors:
             return {
-                "z_in": torch.from_numpy(z_in),
-                "z_target": torch.from_numpy(z_target),
-                "w_in": torch.from_numpy(w_in),
-                "g": torch.from_numpy(g),
+                "z_in": _torch_from_numpy(z_in),
+                "z_target": _torch_from_numpy(z_target),
+                "w_in": _torch_from_numpy(w_in),
+                "g_num": _torch_from_numpy(g_num),
+                "g_num_mask": _torch_from_numpy(g_num_mask),
+                "g_cat": _torch_from_numpy(g_cat),
                 "fire_id": item.fire_id,
             }
 
@@ -95,7 +112,9 @@ class WildfireSequenceDataset:
             "z_in": z_in,
             "z_target": z_target,
             "w_in": w_in,
-            "g": g,
+            "g_num": g_num,
+            "g_num_mask": g_num_mask,
+            "g_cat": g_cat,
             "fire_id": item.fire_id,
         }
 
@@ -127,6 +146,37 @@ class WildfireSequenceDataset:
                 )
             if g.ndim != 1:
                 raise ValueError(f"{fire_id}: g must be 1D, got shape {g.shape}")
+            if g.shape[0] == 0:
+                raise ValueError(f"{fire_id}: g must have at least one element")
+            for idx in self._static_categorical_indices:
+                if idx < 0 or idx >= g.shape[0]:
+                    raise ValueError(
+                        f"{fire_id}: static categorical index {idx} out of bounds for g dim {g.shape[0]}"
+                    )
+
+    def _encode_static_features(self, g: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        cat_indices = np.asarray(self._static_categorical_indices, dtype=np.int64)
+        num_indices = np.asarray(
+            [i for i in range(g.shape[0]) if i not in self._static_categorical_indices],
+            dtype=np.int64,
+        )
+
+        g_num_raw = g[num_indices] if num_indices.size else np.zeros((0,), dtype=np.float32)
+        g_num_mask = (g_num_raw != self._static_missing_value).astype(np.float32)
+        g_num = np.where(g_num_mask == 1.0, g_num_raw, 0.0).astype(np.float32)
+
+        if cat_indices.size:
+            g_cat_raw = g[cat_indices]
+            cat_valid = g_cat_raw != self._static_missing_value
+            rounded = np.rint(g_cat_raw).astype(np.int64)
+            g_cat = np.where(
+                cat_valid,
+                rounded + 1,
+                np.int64(self._categorical_unknown_index),
+            ).astype(np.int64)
+        else:
+            g_cat = np.zeros((0,), dtype=np.int64)
+        return g_num, g_num_mask, g_cat
 
     @staticmethod
     def _load_per_fire_arrays(source: SourceLike, expected_ndim: int) -> dict[str, np.ndarray]:
