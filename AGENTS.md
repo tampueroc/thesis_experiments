@@ -8,3 +8,24 @@ For every delivery, run these checks from the project root and fix issues before
 2. `uv run ty check`
 
 If either command cannot be run due to environment or permission constraints, report that explicitly in the delivery response.
+
+## Execution Policy
+
+- Use `uv` for all local commands (`python`, `pytest`, lint, type checks).
+- Use `uv` for all remote commands as well (for example `/home/tampuero/.local/bin/uv run ...` on SSH host).
+- Local machine is for code editing and lightweight checks.
+- SSH machine is for heavy-duty GPU/data-scale checks.
+
+## Delivery Methodology
+
+1. Implement code changes locally.
+2. Run lightweight local validation with `uv`:
+   - `uv run ruff check`
+   - `uv run ty check`
+   - `uv run --with pytest pytest` (or project pytest env if available)
+3. Commit locally and push.
+4. On SSH machine:
+   - `git pull`
+   - verify commit hash alignment (`git rev-parse HEAD` on both sides).
+5. Run end-to-end heavy checks on SSH with real data using `uv`.
+6. Delivery is closed only after local + SSH validations pass.
