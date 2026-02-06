@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, cast
@@ -46,8 +45,6 @@ class WildfireSequenceDataset:
         stride: int = 1,
         return_tensors: bool = True,
         static_categorical_indices: tuple[int, ...] = (0,),
-        fuel_feature_index: int | None = 0,
-        fuel_lookup_csv: str | Path | None = None,
         static_missing_value: float = -1.0,
         categorical_unknown_index: int = 0,
     ) -> None:
@@ -60,12 +57,10 @@ class WildfireSequenceDataset:
         self._stride = stride
         self._return_tensors = return_tensors
         self._static_categorical_indices = tuple(sorted(set(static_categorical_indices)))
-        self._fuel_feature_index = fuel_feature_index
         self._static_missing_value = float(static_missing_value)
         if categorical_unknown_index < 0:
             raise ValueError("categorical_unknown_index must be >= 0")
         self._categorical_unknown_index = int(categorical_unknown_index)
-        self._fuel_code_to_index = self._load_fuel_lookup(fuel_lookup_csv)
 
         self._z_by_fire = self._load_per_fire_arrays(embeddings_source, expected_ndim=2)
         self._w_by_fire = self._load_per_fire_arrays(weather_source, expected_ndim=2)
@@ -174,47 +169,14 @@ class WildfireSequenceDataset:
             g_cat_raw = g[cat_indices]
             cat_valid = g_cat_raw != self._static_missing_value
             g_cat = np.full(cat_indices.shape[0], np.int64(self._categorical_unknown_index), dtype=np.int64)
-            for i, cat_idx in enumerate(cat_indices.tolist()):
+            for i, _cat_idx in enumerate(cat_indices.tolist()):
                 if not bool(cat_valid[i]):
                     continue
                 raw_value = int(np.rint(g_cat_raw[i]))
-                if self._fuel_feature_index is not None and cat_idx == self._fuel_feature_index:
-                    g_cat[i] = np.int64(
-                        self._fuel_code_to_index.get(raw_value, self._categorical_unknown_index)
-                    )
-                else:
-                    g_cat[i] = np.int64(raw_value + 1)
+                g_cat[i] = np.int64(raw_value)
         else:
             g_cat = np.zeros((0,), dtype=np.int64)
         return g_num, g_num_mask, g_cat
-
-    @staticmethod
-    def _default_fuel_lookup_path() -> Path:
-        return Path(__file__).resolve().parents[1] / "resources" / "spain_lookup_table.csv"
-
-    def _load_fuel_lookup(self, fuel_lookup_csv: str | Path | None) -> dict[int, int]:
-        lookup_path = Path(fuel_lookup_csv) if fuel_lookup_csv is not None else self._default_fuel_lookup_path()
-        if not lookup_path.exists():
-            return {}
-
-        codes: set[int] = set()
-        with lookup_path.open(encoding="utf-8") as fh:
-            reader = csv.reader(fh)
-            for i, row in enumerate(reader):
-                if not row:
-                    continue
-                if i == 0 and row[0].strip().lower() == "grid_value":
-                    continue
-                try:
-                    code = int(row[0].strip())
-                except (TypeError, ValueError):
-                    continue
-                codes.add(code)
-
-        # Keep compatibility with historical usage where 141 is treated as non-fuel.
-        codes.add(141)
-        sorted_codes = sorted(codes)
-        return {code: idx for idx, code in enumerate(sorted_codes, start=1)}
 
     @staticmethod
     def _load_per_fire_arrays(source: SourceLike, expected_ndim: int) -> dict[str, np.ndarray]:

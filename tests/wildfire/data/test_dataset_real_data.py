@@ -29,7 +29,7 @@ def _encode_expected(g: np.ndarray, missing_value: float = -1.0) -> tuple[np.nda
     g_num_raw = np.asarray(g[1:], dtype=np.float32)
     g_num_mask = (g_num_raw != missing_value).astype(np.float32)
     g_num = np.where(g_num_mask == 1.0, g_num_raw, 0.0).astype(np.float32)
-    g_cat = np.where(g_cat_raw != missing_value, np.rint(g_cat_raw).astype(np.int64) + 1, 0).astype(np.int64)
+    g_cat = np.where(g_cat_raw != missing_value, np.rint(g_cat_raw).astype(np.int64), 0).astype(np.int64)
     return g_num, g_num_mask, g_cat
 
 
@@ -109,7 +109,6 @@ def test_static_vectors_align_with_precomputed_sequence_g() -> None:
 
     g_values = np.asarray(np.load(values_path), dtype=np.float32)
     alias_to_row = {str(k): int(v) for k, v in json.loads(keys_path.read_text(encoding="utf-8")).items()}
-
     checked = 0
     for sequence_id in sorted(g_by_fire.keys()):
         sequence_num = parse_sequence_num(sequence_id)

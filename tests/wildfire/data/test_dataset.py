@@ -98,11 +98,11 @@ def test_dataset_static_feature_encoding_missing_and_unk() -> None:
     g_cat = np.asarray(sample["g_cat"], dtype=np.int64)
     assert np.allclose(g_num, np.array([0.7, 0.0], dtype=np.float32))
     assert np.allclose(g_num_mask, np.array([1.0, 0.0], dtype=np.float32))
-    # cat[0]=-1 -> UNK=0, cat[1]=2 -> 3 after +1 offset.
-    assert np.array_equal(g_cat, np.array([0, 3], dtype=np.int64))
+    # cat[0]=-1 -> UNK=0, cat[1]=2 remains raw code 2.
+    assert np.array_equal(g_cat, np.array([0, 2], dtype=np.int64))
 
 
-def test_dataset_fuel_lookup_mapping_for_categorical_feature() -> None:
+def test_dataset_keeps_raw_fuel_codes_for_categorical_feature() -> None:
     z = np.arange(6 * 2, dtype=np.float32).reshape(6, 2)
     w = np.arange(6 * 2, dtype=np.float32).reshape(6, 2)
 
@@ -127,8 +127,8 @@ def test_dataset_fuel_lookup_mapping_for_categorical_feature() -> None:
     unknown_cat = np.asarray(ds_unknown[0]["g_cat"], dtype=np.int64)
     assert known_cat.shape == (1,)
     assert unknown_cat.shape == (1,)
-    assert int(known_cat[0]) > 0
-    assert int(unknown_cat[0]) == 0
+    assert int(known_cat[0]) == 101
+    assert int(unknown_cat[0]) == 9999
 
 
 def test_dataset_raises_for_missing_weather() -> None:
