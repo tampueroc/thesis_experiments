@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Final
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -23,6 +24,8 @@ STATIC_CHANNEL_MEANINGS: list[dict[str, str]] = [
 
 RAW_NODATA_VALUE = -9999.0
 NODATA_VALUE = -1.0
+CHANNEL_ARTEFACT_PREFIX: Final[str] = "g_channel_"
+KEEP_FILENAMES: Final[set[str]] = {"static_channel_meanings.csv"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,6 +61,11 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=30,
         help="Top K values saved for likely categorical channels.",
+    )
+    parser.add_argument(
+        "--clean-output",
+        action="store_true",
+        help="Delete stale non-channel artifacts in output-dir before writing new files.",
     )
     return parser.parse_args()
 
@@ -124,12 +132,16 @@ def build_long_distribution_frame(
     channel_first: np.ndarray,
     summary_df: pd.DataFrame,
     sample_per_channel: int,
+    include_categorical: bool,
 ) -> pd.DataFrame:
     rows: list[pd.DataFrame] = []
     for idx, channel_values in enumerate(channel_first, start=1):
         channel = f"a{idx}"
         feature_row = summary_df[summary_df["channel"] == channel]
         if feature_row.empty:
+            continue
+        is_categorical = bool(feature_row.iloc[0]["likely_categorical"])
+        if is_categorical != include_categorical:
             continue
         feature_name = str(feature_row.iloc[0]["feature"])
         series = pd.Series(channel_values.reshape(-1))
@@ -178,7 +190,7 @@ def save_categorical_counts(
     summary_df: pd.DataFrame,
     output_path: Path,
     top_k: int,
-) -> None:
+) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     categories = summary_df[summary_df["likely_categorical"]]["channel"].tolist()
     for channel in categories:
@@ -196,7 +208,27 @@ def save_categorical_counts(
                     "count": int(count),
                 }
             )
-    pd.DataFrame(rows).to_csv(output_path, index=False)
+    df = pd.DataFrame(rows, columns=["channel", "feature", "value", "count"])
+    df.to_csv(output_path, index=False)
+    return df
+
+
+def save_categorical_plot(counts_df: pd.DataFrame, output_path: Path) -> None:
+    if counts_df.empty:
+        return
+    top_per_feature = (
+        counts_df.sort_values(["feature", "count"], ascending=[True, False])
+        .groupby("feature", as_index=False)
+        .head(10)
+    )
+    g = sns.FacetGrid(top_per_feature, col="feature", col_wrap=3, sharex=False, sharey=False, height=2.8)
+    g.map_dataframe(sns.barplot, x="value", y="count", color="#264653")
+    g.set_titles("{col_name}")
+    for ax in g.axes.flatten():
+        ax.tick_params(axis="x", rotation=45)
+    g.tight_layout()
+    g.savefig(output_path, dpi=180)
+    plt.close("all")
 
 
 def save_nodata_distribution(summary_df: pd.DataFrame, output_path: Path) -> None:
@@ -217,6 +249,17 @@ def save_nodata_plot(summary_df: pd.DataFrame, output_path: Path) -> None:
     plt.close()
 
 
+def cleanup_output_dir(out_dir: Path) -> None:
+    for path in out_dir.glob("*"):
+        if not path.is_file():
+            continue
+        if path.name in KEEP_FILENAMES:
+            continue
+        if path.name.startswith(CHANNEL_ARTEFACT_PREFIX):
+            continue
+        path.unlink()
+
+
 def main() -> None:
     args = parse_args()
     geotiff_path = args.landscape_dir / "Input_Geotiff.tif"
@@ -225,6 +268,8 @@ def main() -> None:
 
     out_dir = args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+    if args.clean_output:
+        cleanup_output_dir(out_dir)
 
     raw = np.asarray(tifffile.imread(geotiff_path))
     raw = _normalize_nodata(raw)
@@ -234,15 +279,17 @@ def main() -> None:
         channel_first=channel_first,
         categorical_unique_threshold=max(1, args.categorical_unique_threshold),
     )
-    long_df = build_long_distribution_frame(
+    continuous_long_df = build_long_distribution_frame(
         channel_first=channel_first,
         summary_df=summary_df,
         sample_per_channel=max(1, args.sample_per_channel),
+        include_categorical=False,
     )
 
     summary_path = out_dir / "g_channel_summary.csv"
     meanings_path = out_dir / "static_channel_meanings.csv"
     cat_counts_path = out_dir / "g_channel_categorical_value_counts.csv"
+    cat_plot_path = out_dir / "g_channel_categorical_top_values.png"
     nodata_dist_path = out_dir / "g_channel_nodata_distribution.csv"
     nodata_plot_path = out_dir / "g_channel_nodata_rates.png"
     ranges_plot_path = out_dir / "g_channel_ranges.png"
@@ -250,22 +297,24 @@ def main() -> None:
 
     summary_df.to_csv(summary_path, index=False)
     pd.DataFrame(STATIC_CHANNEL_MEANINGS).to_csv(meanings_path, index=False)
-    save_categorical_counts(
+    cat_counts_df = save_categorical_counts(
         channel_first=channel_first,
         summary_df=summary_df,
         output_path=cat_counts_path,
         top_k=max(1, args.top_categorical_values),
     )
+    save_categorical_plot(cat_counts_df, cat_plot_path)
     save_nodata_distribution(summary_df, nodata_dist_path)
     save_nodata_plot(summary_df, nodata_plot_path)
-    save_range_plot(long_df, ranges_plot_path)
-    save_distribution_plot(long_df, dist_plot_path)
+    save_range_plot(continuous_long_df, ranges_plot_path)
+    save_distribution_plot(continuous_long_df, dist_plot_path)
 
     print(f"[ok] geotiff={geotiff_path}")
     print(f"[ok] channels={n_channels}")
     print(f"[ok] summary={summary_path}")
     print(f"[ok] meanings={meanings_path}")
     print(f"[ok] categorical_counts={cat_counts_path}")
+    print(f"[ok] categorical_plot={cat_plot_path}")
     print(f"[ok] nodata_dist={nodata_dist_path}")
     print(f"[ok] nodata_plot={nodata_plot_path}")
     print(f"[ok] range_plot={ranges_plot_path}")
