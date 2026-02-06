@@ -91,3 +91,21 @@ This log summarizes the substantial engineering work completed in `thesis_experi
   - typed channel analysis plots
   - final pixel-level terrain elevation rendering.
 - SSH validation runs completed for new scripts and major integration points.
+
+## 10) Final Static-Feature Contract (Latest)
+- Finalized dataset output schema for static inputs:
+  - `g_num: (n,)` with missing (`-1`) replaced by `0`
+  - `g_num_mask: (n,)` with `1=valid`, `0=missing`
+  - `g_cat: (k,)` categorical numeric codes
+- Important encoding decision:
+  - removed categorical `+1` offset
+  - `g_cat` now keeps raw numeric category codes
+  - only missing categorical values map to `UNK=0`
+- Added/updated tests to validate:
+  - real-data sequence static alignment
+  - manual static fetch vs dataset sample consistency
+  - no-offset categorical behavior
+  - SSH-only execution path with `RELELA_ONLY_TEST=1`
+- Confirmed on SSH after sync:
+  - real-data dataset tests pass
+  - contract is stable for downstream model consumption.
