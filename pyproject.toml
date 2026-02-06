@@ -7,6 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "numpy>=2.4.2",
     "pillow>=12.1.0",
+    "tifffile>=2026.1.28",
     "torch>=2.10.0",
     "transformers>=5.1.0",
 ]

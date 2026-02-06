@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import seaborn as sns
+import tifffile
 
 
 STATIC_CHANNEL_MEANINGS: list[dict[str, str]] = [
@@ -20,48 +21,16 @@ STATIC_CHANNEL_MEANINGS: list[dict[str, str]] = [
     {"channel": "a8", "feature": "unknown_a8", "meaning": "loaded but not identified in snippet", "expected_type": "unknown"},
 ]
 
-FEATURE_MEANINGS: dict[str, dict[str, str]] = {
-    "row_start": {"meaning": "bbox row start", "expected_type": "continuous"},
-    "row_end": {"meaning": "bbox row end", "expected_type": "continuous"},
-    "col_start": {"meaning": "bbox col start", "expected_type": "continuous"},
-    "col_end": {"meaning": "bbox col end", "expected_type": "continuous"},
-    "height": {"meaning": "bbox height", "expected_type": "continuous"},
-    "width": {"meaning": "bbox width", "expected_type": "continuous"},
-    "center_row": {"meaning": "bbox center row", "expected_type": "continuous"},
-    "center_col": {"meaning": "bbox center col", "expected_type": "continuous"},
-    "touches_top": {"meaning": "bbox touches top boundary", "expected_type": "categorical"},
-    "touches_bottom": {"meaning": "bbox touches bottom boundary", "expected_type": "categorical"},
-    "touches_left": {"meaning": "bbox touches left boundary", "expected_type": "categorical"},
-    "touches_right": {"meaning": "bbox touches right boundary", "expected_type": "categorical"},
-    "fuels": {"meaning": "fuel model code", "expected_type": "categorical"},
-    "arqueo": {"meaning": "archaeo/land-use class", "expected_type": "categorical"},
-    "cbd": {"meaning": "canopy bulk density", "expected_type": "continuous"},
-    "cbh": {"meaning": "canopy base height", "expected_type": "continuous"},
-    "elevation": {"meaning": "elevation", "expected_type": "continuous"},
-    "flora": {"meaning": "flora/vegetation class", "expected_type": "categorical"},
-    "paleo": {"meaning": "paleo/soil-geology class", "expected_type": "categorical"},
-}
-
-BOUNDARY_FLAG_FEATURES = {
-    "touches_top",
-    "touches_bottom",
-    "touches_left",
-    "touches_right",
-}
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Analyze static landscape features used to derive g and generate "
-            "artifacts (summary tables + seaborn plots)."
-        )
+        description="Analyze static landscape channels from Input_Geotiff.tif.",
     )
     parser.add_argument(
         "--landscape-dir",
         type=Path,
         required=True,
-        help="Path containing indices.json (for example /.../thesis_data/landscape).",
+        help="Path containing Input_Geotiff.tif (for example /.../thesis_data/landscape).",
     )
     parser.add_argument(
         "--output-dir",
@@ -70,82 +39,107 @@ def parse_args() -> argparse.Namespace:
         help="Output directory for generated artifacts.",
     )
     parser.add_argument(
+        "--sample-per-channel",
+        type=int,
+        default=120_000,
+        help="Max sampled pixels per channel for histogram plotting.",
+    )
+    parser.add_argument(
+        "--categorical-unique-threshold",
+        type=int,
+        default=64,
+        help="Mark channel as likely categorical when unique non-NaN values are <= threshold.",
+    )
+    parser.add_argument(
         "--top-categorical-values",
         type=int,
-        default=20,
-        help="Max number of top values to keep per detected categorical feature.",
+        default=30,
+        help="Top K values saved for likely categorical channels.",
     )
     return parser.parse_args()
 
 
-def build_feature_frame(indices_path: Path) -> pd.DataFrame:
-    raw = json.loads(indices_path.read_text(encoding="utf-8"))
-    records: list[dict[str, float | int]] = []
-    for fire_id_str, bbox in raw.items():
-        row_start, row_end, col_start, col_end = [int(v) for v in bbox]
-        height = row_end - row_start
-        width = col_end - col_start
-        center_row = row_start + height / 2.0
-        center_col = col_start + width / 2.0
-        records.append(
-            {
-                "fire_id": int(fire_id_str),
-                "row_start": row_start,
-                "row_end": row_end,
-                "col_start": col_start,
-                "col_end": col_end,
-                "height": height,
-                "width": width,
-                "center_row": center_row,
-                "center_col": center_col,
-                "touches_top": int(row_start == 0),
-                "touches_bottom": int(row_end >= 1173),
-                "touches_left": int(col_start == 0),
-                "touches_right": int(col_end >= 1406),
-            }
-        )
-    return pd.DataFrame.from_records(records).sort_values("fire_id").reset_index(drop=True)
+def _to_channel_first(arr: np.ndarray) -> tuple[np.ndarray, int]:
+    if arr.ndim != 3:
+        raise ValueError(f"expected 3D GeoTIFF data, got shape={arr.shape}")
+    shape = arr.shape
+    if shape[0] <= 32:
+        return arr, shape[0]
+    if shape[-1] <= 32:
+        return arr.transpose(2, 0, 1), shape[-1]
+    raise ValueError(f"cannot infer channel axis from shape={shape}")
 
 
-def detect_categorical_columns(df: pd.DataFrame) -> pd.DataFrame:
+def build_channel_data_frame(
+    channel_first: np.ndarray,
+    categorical_unique_threshold: int,
+) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
-    n = len(df)
-    for col in df.columns:
-        if col == "fire_id":
-            continue
-        s = df[col]
-        metadata = FEATURE_MEANINGS.get(col, {})
-        expected_type = metadata.get("expected_type", "")
-        unique_n = int(s.nunique(dropna=False))
-        is_integer_like = bool((s.dropna() % 1 == 0).all())
-        unique_ratio = unique_n / n if n else 0.0
-        is_binary = unique_n <= 2
-        likely_categorical = is_binary or (is_integer_like and unique_n <= 20 and unique_ratio <= 0.05)
-        if expected_type == "categorical":
-            likely_categorical = True
-        if expected_type == "continuous":
-            likely_categorical = False
+    for idx, channel_values in enumerate(channel_first, start=1):
+        feature_meta = next((m for m in STATIC_CHANNEL_MEANINGS if m["channel"] == f"a{idx}"), None)
+        flat = channel_values.reshape(-1)
+        series = pd.Series(flat)
+        finite = series[pd.notna(series)]
+        n = int(len(finite))
+        unique_n = int(finite.nunique(dropna=True))
+        is_integer_like = bool(((finite % 1) == 0).all()) if n else False
+        likely_categorical = unique_n <= categorical_unique_threshold and is_integer_like
         rows.append(
             {
-                "feature": col,
-                "meaning": metadata.get("meaning", ""),
-                "expected_type": expected_type,
-                "n": n,
-                "dtype": str(s.dtype),
-                "min": float(s.min()),
-                "max": float(s.max()),
-                "mean": float(s.mean()),
-                "std": float(s.std()),
+                "channel": f"a{idx}",
+                "feature": feature_meta["feature"] if feature_meta else f"a{idx}",
+                "meaning": feature_meta["meaning"] if feature_meta else "",
+                "expected_type": feature_meta["expected_type"] if feature_meta else "",
+                "dtype": str(series.dtype),
+                "n_pixels": n,
                 "n_unique": unique_n,
-                "unique_ratio": unique_ratio,
+                "min": float(finite.min()) if n else float("nan"),
+                "max": float(finite.max()) if n else float("nan"),
+                "mean": float(finite.mean()) if n else float("nan"),
+                "std": float(finite.std()) if n else float("nan"),
                 "is_integer_like": is_integer_like,
                 "likely_categorical": likely_categorical,
             }
         )
-    return pd.DataFrame(rows).sort_values("feature").reset_index(drop=True)
+    return pd.DataFrame(rows).sort_values("channel").reset_index(drop=True)
+
+
+def build_long_distribution_frame(
+    channel_first: np.ndarray,
+    summary_df: pd.DataFrame,
+    sample_per_channel: int,
+) -> pd.DataFrame:
+    rows: list[pd.DataFrame] = []
+    for idx, channel_values in enumerate(channel_first, start=1):
+        channel = f"a{idx}"
+        feature_row = summary_df[summary_df["channel"] == channel]
+        if feature_row.empty:
+            continue
+        feature_name = str(feature_row.iloc[0]["feature"])
+        series = pd.Series(channel_values.reshape(-1))
+        series = series[pd.notna(series)]
+        if len(series) > sample_per_channel:
+            series = series.sample(n=sample_per_channel, random_state=7)
+        rows.append(pd.DataFrame({"channel": channel, "feature": feature_name, "value": series.values}))
+    if not rows:
+        return pd.DataFrame(columns=["channel", "feature", "value"])
+    return pd.concat(rows, ignore_index=True)
+
+
+def save_distribution_plot(df: pd.DataFrame, output_path: Path) -> None:
+    if df.empty:
+        return
+    g = sns.FacetGrid(df, col="feature", col_wrap=4, sharex=False, sharey=False, height=2.6)
+    g.map_dataframe(sns.histplot, x="value", bins=80, kde=False, color="#2a9d8f")
+    g.set_titles("{col_name}")
+    g.tight_layout()
+    g.savefig(output_path, dpi=180)
+    plt.close("all")
 
 
 def save_range_plot(df: pd.DataFrame, output_path: Path) -> None:
+    if df.empty:
+        return
     order = (
         df.groupby("feature", as_index=False)["value"]
         .mean()
@@ -155,7 +149,7 @@ def save_range_plot(df: pd.DataFrame, output_path: Path) -> None:
     )
     plt.figure(figsize=(10, 6))
     sns.boxplot(data=df, x="value", y="feature", order=order, color="#7aa6c2")
-    plt.title("Static Feature Ranges")
+    plt.title("Landscape Channel Ranges")
     plt.xlabel("Value")
     plt.ylabel("Feature")
     plt.tight_layout()
@@ -163,35 +157,25 @@ def save_range_plot(df: pd.DataFrame, output_path: Path) -> None:
     plt.close()
 
 
-def save_distribution_plot(df: pd.DataFrame, output_path: Path) -> None:
-    g = sns.FacetGrid(df, col="feature", col_wrap=4, sharex=False, sharey=False, height=2.4)
-    g.map_dataframe(sns.histplot, x="value", bins=40, kde=False, color="#2a9d8f")
-    g.set_titles("{col_name}")
-    g.tight_layout()
-    g.savefig(output_path, dpi=180)
-    plt.close("all")
-
-
 def save_categorical_counts(
-    df: pd.DataFrame,
+    channel_first: np.ndarray,
     summary_df: pd.DataFrame,
     output_path: Path,
     top_k: int,
-    exclude_features: set[str] | None = None,
 ) -> None:
-    excluded = exclude_features or set()
-    cats = [
-        feature
-        for feature in summary_df[summary_df["likely_categorical"]]["feature"].tolist()
-        if feature not in excluded
-    ]
     rows: list[dict[str, object]] = []
-    for feature in cats:
-        vc = df[feature].value_counts(dropna=False).head(top_k)
+    categories = summary_df[summary_df["likely_categorical"]]["channel"].tolist()
+    for channel in categories:
+        channel_idx = int(channel[1:]) - 1
+        values = pd.Series(channel_first[channel_idx].reshape(-1))
+        values = values[pd.notna(values)]
+        vc = values.value_counts(dropna=False).head(top_k)
+        feature_name = str(summary_df[summary_df["channel"] == channel].iloc[0]["feature"])
         for value, count in vc.items():
             rows.append(
                 {
-                    "feature": feature,
+                    "channel": channel,
+                    "feature": feature_name,
                     "value": value,
                     "count": int(count),
                 }
@@ -199,77 +183,50 @@ def save_categorical_counts(
     pd.DataFrame(rows).to_csv(output_path, index=False)
 
 
-def save_boundary_flag_plot(df: pd.DataFrame, output_path: Path) -> None:
-    available_flags = [f for f in BOUNDARY_FLAG_FEATURES if f in df.columns]
-    if not available_flags:
-        return
-    rates = (
-        df[available_flags]
-        .mean()
-        .sort_values(ascending=False)
-        .reset_index(name="rate")
-        .rename(columns={"index": "feature"})
-    )
-    plt.figure(figsize=(7, 4))
-    sns.barplot(data=rates, x="feature", y="rate", color="#457b9d")
-    plt.title("Boundary Contact Rates")
-    plt.xlabel("Boundary flag")
-    plt.ylabel("Rate")
-    plt.ylim(0, 1)
-    plt.xticks(rotation=20, ha="right")
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=180)
-    plt.close()
-
-
 def main() -> None:
     args = parse_args()
-    indices_path = args.landscape_dir / "indices.json"
-    if not indices_path.exists():
-        raise FileNotFoundError(f"indices.json not found: {indices_path}")
+    geotiff_path = args.landscape_dir / "Input_Geotiff.tif"
+    if not geotiff_path.exists():
+        raise FileNotFoundError(f"Input_Geotiff.tif not found: {geotiff_path}")
 
     out_dir = args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    df = build_feature_frame(indices_path)
-    summary_df = detect_categorical_columns(df)
-    categorical_summary = summary_df[summary_df["likely_categorical"]].copy()
-    categorical_summary = categorical_summary[
-        ~categorical_summary["feature"].isin(BOUNDARY_FLAG_FEATURES)
-    ]
-    continuous_features = summary_df[~summary_df["likely_categorical"]]["feature"].tolist()
-    long_df = df[continuous_features].melt(var_name="feature", value_name="value")
+    raw = np.asarray(tifffile.imread(geotiff_path))
+    channel_first, n_channels = _to_channel_first(raw)
 
-    summary_path = out_dir / "g_feature_summary.csv"
-    features_path = out_dir / "g_feature_table.csv"
+    summary_df = build_channel_data_frame(
+        channel_first=channel_first,
+        categorical_unique_threshold=max(1, args.categorical_unique_threshold),
+    )
+    long_df = build_long_distribution_frame(
+        channel_first=channel_first,
+        summary_df=summary_df,
+        sample_per_channel=max(1, args.sample_per_channel),
+    )
+
+    summary_path = out_dir / "g_channel_summary.csv"
     meanings_path = out_dir / "static_channel_meanings.csv"
-    categories_path = out_dir / "g_categorical_candidates.csv"
-    cat_counts_path = out_dir / "g_categorical_value_counts.csv"
-    boundary_plot_path = out_dir / "g_boundary_flag_rates.png"
-    ranges_plot_path = out_dir / "g_feature_ranges.png"
-    dist_plot_path = out_dir / "g_feature_distributions.png"
+    cat_counts_path = out_dir / "g_channel_categorical_value_counts.csv"
+    ranges_plot_path = out_dir / "g_channel_ranges.png"
+    dist_plot_path = out_dir / "g_channel_distributions.png"
 
-    df.to_csv(features_path, index=False)
     summary_df.to_csv(summary_path, index=False)
     pd.DataFrame(STATIC_CHANNEL_MEANINGS).to_csv(meanings_path, index=False)
-    categorical_summary.to_csv(categories_path, index=False)
     save_categorical_counts(
-        df,
-        summary_df,
-        cat_counts_path,
-        top_k=args.top_categorical_values,
-        exclude_features=BOUNDARY_FLAG_FEATURES,
+        channel_first=channel_first,
+        summary_df=summary_df,
+        output_path=cat_counts_path,
+        top_k=max(1, args.top_categorical_values),
     )
-    save_boundary_flag_plot(df, boundary_plot_path)
-    if not long_df.empty:
-        save_range_plot(long_df, ranges_plot_path)
-        save_distribution_plot(long_df, dist_plot_path)
+    save_range_plot(long_df, ranges_plot_path)
+    save_distribution_plot(long_df, dist_plot_path)
 
-    print(f"[ok] rows={len(df)}")
+    print(f"[ok] geotiff={geotiff_path}")
+    print(f"[ok] channels={n_channels}")
     print(f"[ok] summary={summary_path}")
     print(f"[ok] meanings={meanings_path}")
-    print(f"[ok] categories={categories_path}")
-    print(f"[ok] boundary_plot={boundary_plot_path}")
+    print(f"[ok] categorical_counts={cat_counts_path}")
     print(f"[ok] range_plot={ranges_plot_path}")
     print(f"[ok] dist_plot={dist_plot_path}")
 

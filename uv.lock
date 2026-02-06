@@ -1047,6 +1047,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "numpy" },
     { name = "pillow" },
+    { name = "tifffile" },
     { name = "torch" },
     { name = "transformers" },
 ]
@@ -1065,6 +1066,7 @@ dev = [
 requires-dist = [
     { name = "numpy", specifier = ">=2.4.2" },
     { name = "pillow", specifier = ">=12.1.0" },
+    { name = "tifffile", specifier = ">=2026.1.28" },
     { name = "torch", specifier = ">=2.10.0" },
     { name = "transformers", specifier = ">=5.1.0" },
 ]
@@ -1077,6 +1079,18 @@ dev = [
     { name = "ruff", specifier = ">=0.15.0" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "ty", specifier = ">=0.0.15" },
+]
+
+[[package]]
+name = "tifffile"
+version = "2026.1.28"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/94/32/38498d2a1a5d70f33f6c3909bbad48557c9a54b0e33a9307ff06b6d416ba/tifffile-2026.1.28.tar.gz", hash = "sha256:537ae6466a8bb555c336108bb1878d8319d52c9c738041d3349454dea6956e1c", size = 374675, upload-time = "2026-01-29T05:17:24.992Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/09/19/529b28ca338c5a88315e71e672badc85eef89460c248c4164f6ce058f8c7/tifffile-2026.1.28-py3-none-any.whl", hash = "sha256:45b08a19cf603dd99952eff54a61519626a1912e4e2a4d355f05938fe4a6e9fd", size = 233011, upload-time = "2026-01-29T05:17:23.078Z" },
 ]
 
 [[package]]
