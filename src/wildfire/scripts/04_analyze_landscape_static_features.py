@@ -98,7 +98,11 @@ def detect_categorical_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def save_range_plot(df: pd.DataFrame, output_path: Path) -> None:
     order = (
-        df.sort_values("mean", ascending=False)["feature"].astype(str).tolist()
+        df.groupby("feature", as_index=False)["value"]
+        .mean()
+        .sort_values("value", ascending=False)["feature"]
+        .astype(str)
+        .tolist()
     )
     plt.figure(figsize=(10, 6))
     sns.boxplot(data=df, x="value", y="feature", order=order, color="#7aa6c2")
