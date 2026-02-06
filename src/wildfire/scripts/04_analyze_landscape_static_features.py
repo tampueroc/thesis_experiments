@@ -9,6 +9,40 @@ import pandas as pd
 import seaborn as sns
 
 
+STATIC_CHANNEL_MEANINGS: list[dict[str, str]] = [
+    {"channel": "a1", "feature": "fuels", "meaning": "fuel model code", "expected_type": "categorical"},
+    {"channel": "a2", "feature": "arqueo", "meaning": "archaeo/land-use class", "expected_type": "categorical"},
+    {"channel": "a3", "feature": "cbd", "meaning": "canopy bulk density", "expected_type": "continuous"},
+    {"channel": "a4", "feature": "cbh", "meaning": "canopy base height", "expected_type": "continuous"},
+    {"channel": "a5", "feature": "elevation", "meaning": "elevation", "expected_type": "continuous"},
+    {"channel": "a6", "feature": "flora", "meaning": "flora/vegetation class", "expected_type": "categorical"},
+    {"channel": "a7", "feature": "paleo", "meaning": "paleo/soil-geology class", "expected_type": "categorical"},
+    {"channel": "a8", "feature": "unknown_a8", "meaning": "loaded but not identified in snippet", "expected_type": "unknown"},
+]
+
+FEATURE_MEANINGS: dict[str, dict[str, str]] = {
+    "row_start": {"meaning": "bbox row start", "expected_type": "continuous"},
+    "row_end": {"meaning": "bbox row end", "expected_type": "continuous"},
+    "col_start": {"meaning": "bbox col start", "expected_type": "continuous"},
+    "col_end": {"meaning": "bbox col end", "expected_type": "continuous"},
+    "height": {"meaning": "bbox height", "expected_type": "continuous"},
+    "width": {"meaning": "bbox width", "expected_type": "continuous"},
+    "center_row": {"meaning": "bbox center row", "expected_type": "continuous"},
+    "center_col": {"meaning": "bbox center col", "expected_type": "continuous"},
+    "touches_top": {"meaning": "bbox touches top boundary", "expected_type": "categorical"},
+    "touches_bottom": {"meaning": "bbox touches bottom boundary", "expected_type": "categorical"},
+    "touches_left": {"meaning": "bbox touches left boundary", "expected_type": "categorical"},
+    "touches_right": {"meaning": "bbox touches right boundary", "expected_type": "categorical"},
+    "fuels": {"meaning": "fuel model code", "expected_type": "categorical"},
+    "arqueo": {"meaning": "archaeo/land-use class", "expected_type": "categorical"},
+    "cbd": {"meaning": "canopy bulk density", "expected_type": "continuous"},
+    "cbh": {"meaning": "canopy base height", "expected_type": "continuous"},
+    "elevation": {"meaning": "elevation", "expected_type": "continuous"},
+    "flora": {"meaning": "flora/vegetation class", "expected_type": "categorical"},
+    "paleo": {"meaning": "paleo/soil-geology class", "expected_type": "categorical"},
+}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -73,14 +107,22 @@ def detect_categorical_columns(df: pd.DataFrame) -> pd.DataFrame:
         if col == "fire_id":
             continue
         s = df[col]
+        metadata = FEATURE_MEANINGS.get(col, {})
+        expected_type = metadata.get("expected_type", "")
         unique_n = int(s.nunique(dropna=False))
         is_integer_like = bool((s.dropna() % 1 == 0).all())
         unique_ratio = unique_n / n if n else 0.0
         is_binary = unique_n <= 2
         likely_categorical = is_binary or (is_integer_like and unique_n <= 20 and unique_ratio <= 0.05)
+        if expected_type == "categorical":
+            likely_categorical = True
+        if expected_type == "continuous":
+            likely_categorical = False
         rows.append(
             {
                 "feature": col,
+                "meaning": metadata.get("meaning", ""),
+                "expected_type": expected_type,
                 "n": n,
                 "dtype": str(s.dtype),
                 "min": float(s.min()),
@@ -159,6 +201,7 @@ def main() -> None:
 
     summary_path = out_dir / "g_feature_summary.csv"
     features_path = out_dir / "g_feature_table.csv"
+    meanings_path = out_dir / "static_channel_meanings.csv"
     categories_path = out_dir / "g_categorical_candidates.csv"
     cat_counts_path = out_dir / "g_categorical_value_counts.csv"
     ranges_plot_path = out_dir / "g_feature_ranges.png"
@@ -166,6 +209,7 @@ def main() -> None:
 
     df.to_csv(features_path, index=False)
     summary_df.to_csv(summary_path, index=False)
+    pd.DataFrame(STATIC_CHANNEL_MEANINGS).to_csv(meanings_path, index=False)
     summary_df[summary_df["likely_categorical"]].to_csv(categories_path, index=False)
     save_categorical_counts(df, summary_df, cat_counts_path, top_k=args.top_categorical_values)
     save_range_plot(long_df, ranges_plot_path)
@@ -173,6 +217,7 @@ def main() -> None:
 
     print(f"[ok] rows={len(df)}")
     print(f"[ok] summary={summary_path}")
+    print(f"[ok] meanings={meanings_path}")
     print(f"[ok] categories={categories_path}")
     print(f"[ok] range_plot={ranges_plot_path}")
     print(f"[ok] dist_plot={dist_plot_path}")

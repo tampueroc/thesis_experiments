@@ -23,12 +23,14 @@ If either command cannot be run due to environment or permission constraints, re
    - `uv run ruff check`
    - `uv run ty check`
    - `uv run --with pytest pytest` (or project pytest env if available)
-3. Commit locally and push.
-4. On SSH machine:
+3. Commit locally.
+4. Push local changes to origin and wait for successful push confirmation.
+5. Only after push succeeds, run SSH git sync/pull.
+6. On SSH machine:
    - `git pull`
    - verify commit hash alignment (`git rev-parse HEAD` on both sides).
-5. Run end-to-end heavy checks on SSH with real data using `uv`.
-6. Delivery is closed only after local + SSH validations pass.
+7. Run end-to-end heavy checks on SSH with real data using `uv`.
+8. Delivery is closed only after local + SSH validations pass.
 
 ## SSH-Only Real-Data Tests
 
