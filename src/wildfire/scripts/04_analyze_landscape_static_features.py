@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -24,48 +24,22 @@ STATIC_CHANNEL_MEANINGS: list[dict[str, str]] = [
 
 RAW_NODATA_VALUE = -9999.0
 NODATA_VALUE = -1.0
-CHANNEL_ARTEFACT_PREFIX: Final[str] = "g_channel_"
-KEEP_FILENAMES: Final[set[str]] = {"static_channel_meanings.csv"}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Analyze static landscape channels from Input_Geotiff.tif.",
+        description="Analyze Input_Geotiff.tif by channel and emit publication-ready seaborn plots.",
     )
+    parser.add_argument("--landscape-dir", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, default=Path("landscape_static_analss"))
+    parser.add_argument("--sample-per-channel", type=int, default=120_000)
+    parser.add_argument("--categorical-unique-threshold", type=int, default=64)
+    parser.add_argument("--top-categorical-values", type=int, default=20)
     parser.add_argument(
-        "--landscape-dir",
-        type=Path,
-        required=True,
-        help="Path containing Input_Geotiff.tif (for example /.../thesis_data/landscape).",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("landscape_static_analss"),
-        help="Output directory for generated artifacts.",
-    )
-    parser.add_argument(
-        "--sample-per-channel",
-        type=int,
-        default=120_000,
-        help="Max sampled pixels per channel for histogram plotting.",
-    )
-    parser.add_argument(
-        "--categorical-unique-threshold",
-        type=int,
-        default=64,
-        help="Mark channel as likely categorical when unique non-NaN values are <= threshold.",
-    )
-    parser.add_argument(
-        "--top-categorical-values",
-        type=int,
-        default=30,
-        help="Top K values saved for likely categorical channels.",
-    )
-    parser.add_argument(
-        "--clean-output",
-        action="store_true",
-        help="Delete stale non-channel artifacts in output-dir before writing new files.",
+        "--run-timestamp",
+        type=str,
+        default="",
+        help="Optional timestamp folder name (default: current UTC as ISO-like).",
     )
     return parser.parse_args()
 
@@ -73,12 +47,11 @@ def parse_args() -> argparse.Namespace:
 def _to_channel_first(arr: np.ndarray) -> tuple[np.ndarray, int]:
     if arr.ndim != 3:
         raise ValueError(f"expected 3D GeoTIFF data, got shape={arr.shape}")
-    shape = arr.shape
-    if shape[0] <= 32:
-        return arr, shape[0]
-    if shape[-1] <= 32:
-        return arr.transpose(2, 0, 1), shape[-1]
-    raise ValueError(f"cannot infer channel axis from shape={shape}")
+    if arr.shape[0] <= 32:
+        return arr, arr.shape[0]
+    if arr.shape[-1] <= 32:
+        return arr.transpose(2, 0, 1), arr.shape[-1]
+    raise ValueError(f"cannot infer channel axis from shape={arr.shape}")
 
 
 def _normalize_nodata(arr: np.ndarray) -> np.ndarray:
@@ -89,175 +62,185 @@ def _valid_values(series: pd.Series) -> pd.Series:
     return series[pd.notna(series) & (series != NODATA_VALUE)]
 
 
-def build_channel_data_frame(
-    channel_first: np.ndarray,
-    categorical_unique_threshold: int,
-) -> pd.DataFrame:
+def _resolve_run_dir(base_dir: Path, run_timestamp: str) -> Path:
+    ts = run_timestamp or datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
+    out = base_dir / ts
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _channel_meta(channel_idx: int) -> dict[str, str]:
+    channel = f"a{channel_idx}"
+    return next((m for m in STATIC_CHANNEL_MEANINGS if m["channel"] == channel), {"channel": channel, "feature": channel, "meaning": "", "expected_type": "unknown"})
+
+
+def build_summary(channel_first: np.ndarray, categorical_unique_threshold: int) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for idx, channel_values in enumerate(channel_first, start=1):
-        feature_meta = next((m for m in STATIC_CHANNEL_MEANINGS if m["channel"] == f"a{idx}"), None)
-        flat = channel_values.reshape(-1)
-        series = pd.Series(flat)
+        meta = _channel_meta(idx)
+        series = pd.Series(channel_values.reshape(-1))
+        valid = _valid_values(series)
         n_total = int(len(series))
         n_nodata = int((series == NODATA_VALUE).sum())
-        finite = _valid_values(series)
-        n = int(len(finite))
-        unique_n = int(finite.nunique(dropna=True))
-        is_integer_like = bool(((finite % 1) == 0).all()) if n else False
-        likely_categorical = unique_n <= categorical_unique_threshold and is_integer_like
+        n_valid = int(len(valid))
+        n_unique_valid = int(valid.nunique(dropna=True))
+        is_integer_like = bool(((valid % 1) == 0).all()) if n_valid else False
+        likely_categorical = n_unique_valid <= categorical_unique_threshold and is_integer_like
+        n_unique_all = n_unique_valid + int(n_nodata > 0)
         rows.append(
             {
-                "channel": f"a{idx}",
-                "feature": feature_meta["feature"] if feature_meta else f"a{idx}",
-                "meaning": feature_meta["meaning"] if feature_meta else "",
-                "expected_type": feature_meta["expected_type"] if feature_meta else "",
-                "dtype": str(series.dtype),
+                "channel": meta["channel"],
+                "feature": meta["feature"],
+                "meaning": meta["meaning"],
+                "expected_type": meta["expected_type"],
                 "n_total": n_total,
                 "n_nodata": n_nodata,
                 "nodata_ratio": float(n_nodata / n_total) if n_total else float("nan"),
-                "n_pixels": n,
-                "n_unique": unique_n,
-                "min": float(finite.min()) if n else float("nan"),
-                "max": float(finite.max()) if n else float("nan"),
-                "mean": float(finite.mean()) if n else float("nan"),
-                "std": float(finite.std()) if n else float("nan"),
+                "n_valid": n_valid,
+                "valid_ratio": float(n_valid / n_total) if n_total else float("nan"),
+                "n_unique_valid": n_unique_valid,
+                "n_unique_all": n_unique_all,
+                "min": float(valid.min()) if n_valid else float("nan"),
+                "max": float(valid.max()) if n_valid else float("nan"),
+                "mean": float(valid.mean()) if n_valid else float("nan"),
+                "std": float(valid.std()) if n_valid else float("nan"),
                 "is_integer_like": is_integer_like,
                 "likely_categorical": likely_categorical,
             }
         )
-    return pd.DataFrame(rows).sort_values("channel").reset_index(drop=True)
+    summary = pd.DataFrame(rows).sort_values("channel").reset_index(drop=True)
+    summary["is_binary_presence"] = (
+        (summary["n_unique_valid"] == 1)
+        & (summary["n_unique_all"] == 2)
+        & (summary["min"] == 1.0)
+        & (summary["max"] == 1.0)
+    )
+    summary["is_multiclass_categorical"] = summary["likely_categorical"] & ~summary["is_binary_presence"] & (summary["n_unique_valid"] > 1)
+    summary["is_continuous"] = ~summary["likely_categorical"]
+    return summary
 
 
-def build_long_distribution_frame(
+def build_long_values(
     channel_first: np.ndarray,
     summary_df: pd.DataFrame,
+    only_column: str,
     sample_per_channel: int,
-    include_categorical: bool,
 ) -> pd.DataFrame:
     rows: list[pd.DataFrame] = []
-    for idx, channel_values in enumerate(channel_first, start=1):
-        channel = f"a{idx}"
-        feature_row = summary_df[summary_df["channel"] == channel]
-        if feature_row.empty:
-            continue
-        is_categorical = bool(feature_row.iloc[0]["likely_categorical"])
-        if is_categorical != include_categorical:
-            continue
-        feature_name = str(feature_row.iloc[0]["feature"])
-        series = pd.Series(channel_values.reshape(-1))
-        series = _valid_values(series)
-        if len(series) > sample_per_channel:
-            series = series.sample(n=sample_per_channel, random_state=7)
-        rows.append(pd.DataFrame({"channel": channel, "feature": feature_name, "value": series.values}))
+    selected = summary_df[summary_df[only_column]]["channel"].tolist()
+    for channel in selected:
+        idx = int(channel[1:]) - 1
+        feature = str(summary_df[summary_df["channel"] == channel]["feature"].iloc[0])
+        values = _valid_values(pd.Series(channel_first[idx].reshape(-1)))
+        if len(values) > sample_per_channel:
+            values = values.sample(n=sample_per_channel, random_state=7)
+        rows.append(pd.DataFrame({"channel": channel, "feature": feature, "value": values.values}))
     if not rows:
         return pd.DataFrame(columns=["channel", "feature", "value"])
     return pd.concat(rows, ignore_index=True)
 
 
-def save_distribution_plot(df: pd.DataFrame, output_path: Path) -> None:
-    if df.empty:
-        return
-    g = sns.FacetGrid(df, col="feature", col_wrap=4, sharex=False, sharey=False, height=2.6)
-    g.map_dataframe(sns.histplot, x="value", bins=80, kde=False, color="#2a9d8f")
-    g.set_titles("{col_name}")
-    g.tight_layout()
-    g.savefig(output_path, dpi=180)
-    plt.close("all")
-
-
-def save_range_plot(df: pd.DataFrame, output_path: Path) -> None:
-    if df.empty:
-        return
-    order = (
-        df.groupby("feature", as_index=False)["value"]
-        .mean()
-        .sort_values("value", ascending=False)["feature"]
-        .astype(str)
-        .tolist()
-    )
-    plt.figure(figsize=(10, 6))
-    sns.boxplot(data=df, x="value", y="feature", order=order, color="#7aa6c2")
-    plt.title("Landscape Channel Ranges")
-    plt.xlabel("Value")
-    plt.ylabel("Feature")
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=180)
-    plt.close()
-
-
-def save_categorical_counts(
+def build_categorical_counts(
     channel_first: np.ndarray,
     summary_df: pd.DataFrame,
-    output_path: Path,
     top_k: int,
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
-    categories = summary_df[summary_df["likely_categorical"]]["channel"].tolist()
-    for channel in categories:
-        channel_idx = int(channel[1:]) - 1
-        values = pd.Series(channel_first[channel_idx].reshape(-1))
-        values = _valid_values(values)
-        vc = values.value_counts(dropna=False).head(top_k)
-        feature_name = str(summary_df[summary_df["channel"] == channel].iloc[0]["feature"])
+    channels = summary_df[summary_df["is_multiclass_categorical"]]["channel"].tolist()
+    for channel in channels:
+        idx = int(channel[1:]) - 1
+        feature = str(summary_df[summary_df["channel"] == channel]["feature"].iloc[0])
+        vc = _valid_values(pd.Series(channel_first[idx].reshape(-1))).value_counts().head(top_k)
+        total = int(vc.sum()) if len(vc) else 1
         for value, count in vc.items():
             rows.append(
                 {
                     "channel": channel,
-                    "feature": feature_name,
-                    "value": value,
+                    "feature": feature,
+                    "value": str(value),
                     "count": int(count),
+                    "ratio_in_topk": float(count / total),
                 }
             )
-    df = pd.DataFrame(rows, columns=["channel", "feature", "value", "count"])
-    df.to_csv(output_path, index=False)
-    return df
+    return pd.DataFrame(rows, columns=["channel", "feature", "value", "count", "ratio_in_topk"])
 
 
-def save_categorical_plot(counts_df: pd.DataFrame, output_path: Path) -> None:
-    if counts_df.empty:
+def save_continuous_distribution_plot(df: pd.DataFrame, output_path: Path) -> None:
+    if df.empty:
         return
-    top_per_feature = (
-        counts_df.sort_values(["feature", "count"], ascending=[True, False])
-        .groupby("feature", as_index=False)
-        .head(10)
-    )
-    g = sns.FacetGrid(top_per_feature, col="feature", col_wrap=3, sharex=False, sharey=False, height=2.8)
-    g.map_dataframe(sns.barplot, x="value", y="count", color="#264653")
+    g = sns.FacetGrid(df, col="feature", col_wrap=3, sharex=False, sharey=False, height=3.0)
+    g.map_dataframe(sns.histplot, x="value", bins=60, stat="density", color="#2a9d8f", alpha=0.75)
+    g.map_dataframe(sns.kdeplot, x="value", color="#1d3557", linewidth=1.6)
+    g.set_axis_labels("Value", "Density")
     g.set_titles("{col_name}")
-    for ax in g.axes.flatten():
-        ax.tick_params(axis="x", rotation=45)
     g.tight_layout()
-    g.savefig(output_path, dpi=180)
+    g.savefig(output_path, dpi=200)
     plt.close("all")
 
 
-def save_nodata_distribution(summary_df: pd.DataFrame, output_path: Path) -> None:
-    summary_df[["channel", "feature", "n_total", "n_nodata", "nodata_ratio"]].to_csv(output_path, index=False)
-
-
-def save_nodata_plot(summary_df: pd.DataFrame, output_path: Path) -> None:
-    plot_df = summary_df.sort_values("nodata_ratio", ascending=False)
-    plt.figure(figsize=(8, 4))
-    sns.barplot(data=plot_df, x="feature", y="nodata_ratio", color="#e76f51")
-    plt.title("No-Data Ratio by Channel")
-    plt.xlabel("Feature")
-    plt.ylabel("No-data ratio")
-    plt.ylim(0, 1)
-    plt.xticks(rotation=20, ha="right")
+def save_continuous_range_plot(df: pd.DataFrame, output_path: Path) -> None:
+    if df.empty:
+        return
+    median_df = df.groupby("feature", as_index=False).agg(value=("value", "median"))
+    order = median_df.sort_values(by="value", ascending=False)["feature"].tolist()
+    plt.figure(figsize=(11, 5.5))
+    sns.boxenplot(data=df, x="value", y="feature", order=order, color="#457b9d")
+    plt.title("Continuous Channel Value Ranges (No -1 No-Data)")
+    plt.xlabel("Value")
+    plt.ylabel("Feature")
     plt.tight_layout()
-    plt.savefig(output_path, dpi=180)
+    plt.savefig(output_path, dpi=200)
     plt.close()
 
 
-def cleanup_output_dir(out_dir: Path) -> None:
-    for path in out_dir.glob("*"):
-        if not path.is_file():
-            continue
-        if path.name in KEEP_FILENAMES:
-            continue
-        if path.name.startswith(CHANNEL_ARTEFACT_PREFIX):
-            continue
-        path.unlink()
+def save_multiclass_plot(counts_df: pd.DataFrame, output_path: Path) -> None:
+    if counts_df.empty:
+        return
+    g = sns.FacetGrid(counts_df, col="feature", col_wrap=2, sharex=False, sharey=False, height=3.2)
+    g.map_dataframe(sns.barplot, x="value", y="ratio_in_topk", color="#264653")
+    g.set_axis_labels("Class Value", "Share Within Top-K")
+    g.set_titles("{col_name}")
+    for ax in g.axes.flatten():
+        ax.tick_params(axis="x", rotation=45)
+        ax.set_ylim(0, 1)
+    g.tight_layout()
+    g.savefig(output_path, dpi=200)
+    plt.close("all")
+
+
+def save_binary_presence_plot(summary_df: pd.DataFrame, output_path: Path) -> None:
+    binary_df = summary_df[summary_df["is_binary_presence"]].copy()
+    if binary_df.empty:
+        return
+    plot_df = pd.concat(
+        [
+            binary_df[["feature", "valid_ratio"]].rename(columns={"valid_ratio": "ratio"}).assign(state="present(1)"),
+            binary_df[["feature", "nodata_ratio"]].rename(columns={"nodata_ratio": "ratio"}).assign(state="no_data(-1)"),
+        ],
+        ignore_index=True,
+    )
+    plt.figure(figsize=(10, 4.2))
+    sns.barplot(data=plot_df, x="feature", y="ratio", hue="state", palette=["#2a9d8f", "#e76f51"])
+    plt.title("Binary Presence Channels: Present vs No-Data")
+    plt.xlabel("Feature")
+    plt.ylabel("Ratio")
+    plt.ylim(0, 1)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200)
+    plt.close()
+
+
+def save_nodata_plot(summary_df: pd.DataFrame, output_path: Path) -> None:
+    plt.figure(figsize=(9, 4.2))
+    plot_df = summary_df.sort_values("nodata_ratio", ascending=False)
+    sns.barplot(data=plot_df, x="feature", y="nodata_ratio", color="#e76f51")
+    plt.title("No-Data (-1) Ratio by Channel")
+    plt.xlabel("Feature")
+    plt.ylabel("No-data ratio")
+    plt.ylim(0, 1)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200)
+    plt.close()
 
 
 def main() -> None:
@@ -266,59 +249,53 @@ def main() -> None:
     if not geotiff_path.exists():
         raise FileNotFoundError(f"Input_Geotiff.tif not found: {geotiff_path}")
 
-    out_dir = args.output_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
-    if args.clean_output:
-        cleanup_output_dir(out_dir)
+    sns.set_theme(style="whitegrid", context="talk")
+    run_dir = _resolve_run_dir(args.output_dir, args.run_timestamp.strip())
 
-    raw = np.asarray(tifffile.imread(geotiff_path))
-    raw = _normalize_nodata(raw)
-    channel_first, n_channels = _to_channel_first(raw)
+    channel_first, n_channels = _to_channel_first(_normalize_nodata(np.asarray(tifffile.imread(geotiff_path))))
+    summary_df = build_summary(channel_first, categorical_unique_threshold=max(1, args.categorical_unique_threshold))
 
-    summary_df = build_channel_data_frame(
-        channel_first=channel_first,
-        categorical_unique_threshold=max(1, args.categorical_unique_threshold),
-    )
-    continuous_long_df = build_long_distribution_frame(
+    continuous_df = build_long_values(
         channel_first=channel_first,
         summary_df=summary_df,
+        only_column="is_continuous",
         sample_per_channel=max(1, args.sample_per_channel),
-        include_categorical=False,
+    )
+    multiclass_counts_df = build_categorical_counts(
+        channel_first=channel_first,
+        summary_df=summary_df,
+        top_k=max(1, args.top_categorical_values),
     )
 
-    summary_path = out_dir / "g_channel_summary.csv"
-    meanings_path = out_dir / "static_channel_meanings.csv"
-    cat_counts_path = out_dir / "g_channel_categorical_value_counts.csv"
-    cat_plot_path = out_dir / "g_channel_categorical_top_values.png"
-    nodata_dist_path = out_dir / "g_channel_nodata_distribution.csv"
-    nodata_plot_path = out_dir / "g_channel_nodata_rates.png"
-    ranges_plot_path = out_dir / "g_channel_ranges.png"
-    dist_plot_path = out_dir / "g_channel_distributions.png"
+    summary_path = run_dir / "g_channel_summary.csv"
+    meanings_path = run_dir / "static_channel_meanings.csv"
+    multiclass_counts_path = run_dir / "g_channel_multiclass_value_counts.csv"
+    cont_dist_path = run_dir / "g_channel_continuous_distributions.png"
+    cont_range_path = run_dir / "g_channel_continuous_ranges.png"
+    multiclass_plot_path = run_dir / "g_channel_multiclass_top_values.png"
+    binary_plot_path = run_dir / "g_channel_binary_presence.png"
+    nodata_plot_path = run_dir / "g_channel_nodata_rates.png"
 
     summary_df.to_csv(summary_path, index=False)
     pd.DataFrame(STATIC_CHANNEL_MEANINGS).to_csv(meanings_path, index=False)
-    cat_counts_df = save_categorical_counts(
-        channel_first=channel_first,
-        summary_df=summary_df,
-        output_path=cat_counts_path,
-        top_k=max(1, args.top_categorical_values),
-    )
-    save_categorical_plot(cat_counts_df, cat_plot_path)
-    save_nodata_distribution(summary_df, nodata_dist_path)
+    multiclass_counts_df.to_csv(multiclass_counts_path, index=False)
+    save_continuous_distribution_plot(continuous_df, cont_dist_path)
+    save_continuous_range_plot(continuous_df, cont_range_path)
+    save_multiclass_plot(multiclass_counts_df, multiclass_plot_path)
+    save_binary_presence_plot(summary_df, binary_plot_path)
     save_nodata_plot(summary_df, nodata_plot_path)
-    save_range_plot(continuous_long_df, ranges_plot_path)
-    save_distribution_plot(continuous_long_df, dist_plot_path)
 
     print(f"[ok] geotiff={geotiff_path}")
     print(f"[ok] channels={n_channels}")
+    print(f"[ok] run_dir={run_dir}")
     print(f"[ok] summary={summary_path}")
     print(f"[ok] meanings={meanings_path}")
-    print(f"[ok] categorical_counts={cat_counts_path}")
-    print(f"[ok] categorical_plot={cat_plot_path}")
-    print(f"[ok] nodata_dist={nodata_dist_path}")
+    print(f"[ok] multiclass_counts={multiclass_counts_path}")
+    print(f"[ok] continuous_dist={cont_dist_path}")
+    print(f"[ok] continuous_range={cont_range_path}")
+    print(f"[ok] multiclass_plot={multiclass_plot_path}")
+    print(f"[ok] binary_plot={binary_plot_path}")
     print(f"[ok] nodata_plot={nodata_plot_path}")
-    print(f"[ok] range_plot={ranges_plot_path}")
-    print(f"[ok] dist_plot={dist_plot_path}")
 
 
 if __name__ == "__main__":
