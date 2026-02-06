@@ -21,6 +21,9 @@ STATIC_CHANNEL_MEANINGS: list[dict[str, str]] = [
     {"channel": "a8", "feature": "unknown_a8", "meaning": "loaded but not identified in snippet", "expected_type": "unknown"},
 ]
 
+RAW_NODATA_VALUE = -9999.0
+NODATA_VALUE = -1.0
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -70,6 +73,14 @@ def _to_channel_first(arr: np.ndarray) -> tuple[np.ndarray, int]:
     raise ValueError(f"cannot infer channel axis from shape={shape}")
 
 
+def _normalize_nodata(arr: np.ndarray) -> np.ndarray:
+    return np.where(arr == RAW_NODATA_VALUE, NODATA_VALUE, arr)
+
+
+def _valid_values(series: pd.Series) -> pd.Series:
+    return series[pd.notna(series) & (series != NODATA_VALUE)]
+
+
 def build_channel_data_frame(
     channel_first: np.ndarray,
     categorical_unique_threshold: int,
@@ -79,7 +90,9 @@ def build_channel_data_frame(
         feature_meta = next((m for m in STATIC_CHANNEL_MEANINGS if m["channel"] == f"a{idx}"), None)
         flat = channel_values.reshape(-1)
         series = pd.Series(flat)
-        finite = series[pd.notna(series)]
+        n_total = int(len(series))
+        n_nodata = int((series == NODATA_VALUE).sum())
+        finite = _valid_values(series)
         n = int(len(finite))
         unique_n = int(finite.nunique(dropna=True))
         is_integer_like = bool(((finite % 1) == 0).all()) if n else False
@@ -91,6 +104,9 @@ def build_channel_data_frame(
                 "meaning": feature_meta["meaning"] if feature_meta else "",
                 "expected_type": feature_meta["expected_type"] if feature_meta else "",
                 "dtype": str(series.dtype),
+                "n_total": n_total,
+                "n_nodata": n_nodata,
+                "nodata_ratio": float(n_nodata / n_total) if n_total else float("nan"),
                 "n_pixels": n,
                 "n_unique": unique_n,
                 "min": float(finite.min()) if n else float("nan"),
@@ -117,7 +133,7 @@ def build_long_distribution_frame(
             continue
         feature_name = str(feature_row.iloc[0]["feature"])
         series = pd.Series(channel_values.reshape(-1))
-        series = series[pd.notna(series)]
+        series = _valid_values(series)
         if len(series) > sample_per_channel:
             series = series.sample(n=sample_per_channel, random_state=7)
         rows.append(pd.DataFrame({"channel": channel, "feature": feature_name, "value": series.values}))
@@ -168,7 +184,7 @@ def save_categorical_counts(
     for channel in categories:
         channel_idx = int(channel[1:]) - 1
         values = pd.Series(channel_first[channel_idx].reshape(-1))
-        values = values[pd.notna(values)]
+        values = _valid_values(values)
         vc = values.value_counts(dropna=False).head(top_k)
         feature_name = str(summary_df[summary_df["channel"] == channel].iloc[0]["feature"])
         for value, count in vc.items():
@@ -183,6 +199,24 @@ def save_categorical_counts(
     pd.DataFrame(rows).to_csv(output_path, index=False)
 
 
+def save_nodata_distribution(summary_df: pd.DataFrame, output_path: Path) -> None:
+    summary_df[["channel", "feature", "n_total", "n_nodata", "nodata_ratio"]].to_csv(output_path, index=False)
+
+
+def save_nodata_plot(summary_df: pd.DataFrame, output_path: Path) -> None:
+    plot_df = summary_df.sort_values("nodata_ratio", ascending=False)
+    plt.figure(figsize=(8, 4))
+    sns.barplot(data=plot_df, x="feature", y="nodata_ratio", color="#e76f51")
+    plt.title("No-Data Ratio by Channel")
+    plt.xlabel("Feature")
+    plt.ylabel("No-data ratio")
+    plt.ylim(0, 1)
+    plt.xticks(rotation=20, ha="right")
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=180)
+    plt.close()
+
+
 def main() -> None:
     args = parse_args()
     geotiff_path = args.landscape_dir / "Input_Geotiff.tif"
@@ -193,6 +227,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     raw = np.asarray(tifffile.imread(geotiff_path))
+    raw = _normalize_nodata(raw)
     channel_first, n_channels = _to_channel_first(raw)
 
     summary_df = build_channel_data_frame(
@@ -208,6 +243,8 @@ def main() -> None:
     summary_path = out_dir / "g_channel_summary.csv"
     meanings_path = out_dir / "static_channel_meanings.csv"
     cat_counts_path = out_dir / "g_channel_categorical_value_counts.csv"
+    nodata_dist_path = out_dir / "g_channel_nodata_distribution.csv"
+    nodata_plot_path = out_dir / "g_channel_nodata_rates.png"
     ranges_plot_path = out_dir / "g_channel_ranges.png"
     dist_plot_path = out_dir / "g_channel_distributions.png"
 
@@ -219,6 +256,8 @@ def main() -> None:
         output_path=cat_counts_path,
         top_k=max(1, args.top_categorical_values),
     )
+    save_nodata_distribution(summary_df, nodata_dist_path)
+    save_nodata_plot(summary_df, nodata_plot_path)
     save_range_plot(long_df, ranges_plot_path)
     save_distribution_plot(long_df, dist_plot_path)
 
@@ -227,6 +266,8 @@ def main() -> None:
     print(f"[ok] summary={summary_path}")
     print(f"[ok] meanings={meanings_path}")
     print(f"[ok] categorical_counts={cat_counts_path}")
+    print(f"[ok] nodata_dist={nodata_dist_path}")
+    print(f"[ok] nodata_plot={nodata_plot_path}")
     print(f"[ok] range_plot={ranges_plot_path}")
     print(f"[ok] dist_plot={dist_plot_path}")
 
