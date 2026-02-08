@@ -2,8 +2,9 @@ component = "latent_predictor"
 family = "lstm"
 variant = "model_01"
 
-dataset_windowing = "fixed"
-dataset_history = 5
+dataset_windowing = "variable"
+dataset_history_min = 2
+dataset_history_max = 5
 dataset_stride = 1
 dataset_sampling = "random_end_index"
 
@@ -35,7 +36,7 @@ wandb_project = "latent_wildfire"
 wandb_entity = ""
 wandb_run_name = ""
 wandb_mode = "online"
-wandb_tags = "wildfire,latent_predictor,lstm,model_01,long"
+wandb_tags = "wildfire,latent_predictor,lstm,model_01,variable_h2_5_long"
 
 [early_stopping]
 enabled = true

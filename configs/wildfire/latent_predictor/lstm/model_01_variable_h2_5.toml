@@ -2,8 +2,9 @@ component = "latent_predictor"
 family = "lstm"
 variant = "model_01"
 
-dataset_windowing = "fixed"
-dataset_history = 5
+dataset_windowing = "variable"
+dataset_history_min = 2
+dataset_history_max = 5
 dataset_stride = 1
 dataset_sampling = "random_end_index"
 
@@ -18,14 +19,14 @@ train_ratio = 0.7
 val_ratio = 0.15
 seed = 7
 
-batch_size = 64
-epochs = 300
-learning_rate = 0.0005
-hidden_dim = 512
+batch_size = 32
+epochs = 120
+learning_rate = 0.001
+hidden_dim = 256
 num_layers = 2
-dropout = 0.2
+dropout = 0.1
 bidirectional = false
-num_workers = 4
+num_workers = 0
 device = "auto"
 
 output_dir = "artifacts/wildfire"
@@ -35,7 +36,7 @@ wandb_project = "latent_wildfire"
 wandb_entity = ""
 wandb_run_name = ""
 wandb_mode = "online"
-wandb_tags = "wildfire,latent_predictor,lstm,model_01,long"
+wandb_tags = "wildfire,latent_predictor,lstm,model_01,variable_h2_5"
 
 [early_stopping]
 enabled = true

@@ -110,6 +110,41 @@ def parse_args() -> argparse.Namespace:
         help="Model variant identifier.",
     )
     parser.add_argument(
+        "--dataset-windowing",
+        choices=["fixed", "variable", "sliding"],
+        default=cfg_value("dataset_windowing", "fixed"),
+        help="Dataset windowing mode.",
+    )
+    parser.add_argument(
+        "--dataset-history",
+        type=int,
+        default=int(cfg_value("dataset_history", cfg_value("history", 5))),
+        help="History window length for fixed mode.",
+    )
+    parser.add_argument(
+        "--dataset-history-min",
+        type=int,
+        default=int(cfg_value("dataset_history_min", 2)),
+        help="Minimum history length for variable/sliding mode.",
+    )
+    parser.add_argument(
+        "--dataset-history-max",
+        type=int,
+        default=int(cfg_value("dataset_history_max", 10)),
+        help="Maximum history length for variable/sliding mode.",
+    )
+    parser.add_argument(
+        "--dataset-sampling",
+        default=cfg_value("dataset_sampling", "random_end_index"),
+        help="Sampling variant name for dataset mode metadata.",
+    )
+    parser.add_argument(
+        "--dataset-stride",
+        type=int,
+        default=int(cfg_value("dataset_stride", 1)),
+        help="Dataset stride for sample index construction.",
+    )
+    parser.add_argument(
         "--history", type=int, default=int(cfg_value("history", 5)), help="History window length."
     )
     parser.add_argument(
@@ -285,6 +320,50 @@ def maybe_tqdm(iterable: Any, *, enabled: bool, desc: str) -> Any:
     return tqdm(iterable, desc=desc, leave=True)
 
 
+def resolve_history_settings(args: argparse.Namespace) -> tuple[int, int, int]:
+    if args.dataset_windowing == "fixed":
+        if args.dataset_history < 1:
+            raise ValueError("dataset_history must be >= 1")
+        return args.dataset_history, args.dataset_history, args.dataset_history
+
+    if args.dataset_history_min < 1:
+        raise ValueError("dataset_history_min must be >= 1")
+    if args.dataset_history_max < args.dataset_history_min:
+        raise ValueError("dataset_history_max must be >= dataset_history_min")
+    return args.dataset_history_max, args.dataset_history_min, args.dataset_history_max
+
+
+def dataset_variant_name(windowing: str, history_min: int, history_max: int) -> str:
+    if windowing == "fixed":
+        return f"fixed_h{history_max}"
+    return f"variable_h{history_min}-{history_max}"
+
+
+def apply_variable_history_inplace(
+    z_in: Any,
+    w_in: Any | None,
+    *,
+    enabled: bool,
+    history_min: int,
+    history_max: int,
+) -> None:
+    if not enabled:
+        return
+    if history_max <= history_min:
+        return
+    batch_size = int(z_in.shape[0])
+    for i in range(batch_size):
+        hist = random.randint(history_min, history_max)
+        prefix_len = history_max - hist
+        if prefix_len <= 0:
+            continue
+        z_anchor = z_in[i, prefix_len : prefix_len + 1, :]
+        z_in[i, :prefix_len, :] = z_anchor
+        if w_in is not None:
+            w_anchor = w_in[i, prefix_len : prefix_len + 1, :]
+            w_in[i, :prefix_len, :] = w_anchor
+
+
 def is_better(current: float, best: float | None, mode: str, min_delta: float) -> bool:
     if not np.isfinite(current):
         return False
@@ -392,6 +471,9 @@ def run_epoch(
     optimizer: Any | None,
     show_progress: bool,
     desc: str,
+    variable_windowing: bool,
+    history_min: int,
+    history_max: int,
 ) -> dict[str, float]:
     training = optimizer is not None
     model.train(training)
@@ -404,7 +486,15 @@ def run_epoch(
     grad_norm_steps = 0
     for batch in maybe_tqdm(loader, enabled=show_progress, desc=desc):
         z_in = batch["z_in"].to(device)
+        w_in = batch["w_in"].to(device) if "w_in" in batch else None
         z_target = batch["z_target"].to(device)
+        apply_variable_history_inplace(
+            z_in,
+            w_in,
+            enabled=variable_windowing,
+            history_min=history_min,
+            history_max=history_max,
+        )
 
         if training:
             if optimizer is None:
@@ -504,8 +594,8 @@ def rollout_metrics_at_horizon(
 
 def main() -> None:
     args = parse_args()
-    if args.history < 1:
-        raise ValueError("history must be >= 1")
+    history_for_dataset, history_min, history_max = resolve_history_settings(args)
+    variant_name = dataset_variant_name(args.dataset_windowing, history_min, history_max)
 
     timestamp = choose_timestamp(args.embeddings_root, args.timestamp)
     model_dir = args.embeddings_root / timestamp / args.input_type / args.embeddings_model_slug
@@ -535,22 +625,25 @@ def main() -> None:
 
     train_ds = WildfireSequenceDataset(
         *train_sources,
-        history=args.history,
+        history=history_for_dataset,
+        stride=args.dataset_stride,
         return_tensors=True,
     )
     val_ds = WildfireSequenceDataset(
         *val_sources,
-        history=args.history,
+        history=history_for_dataset,
+        stride=args.dataset_stride,
         return_tensors=True,
     )
     holdout_ds = WildfireSequenceDataset(
         *holdout_sources,
-        history=args.history,
+        history=history_for_dataset,
+        stride=args.dataset_stride,
         return_tensors=True,
     )
     if len(train_ds) == 0 or len(val_ds) == 0:
         raise RuntimeError(
-            f"empty split after history={args.history}: train={len(train_ds)}, val={len(val_ds)}"
+            f"empty split after history={history_for_dataset}: train={len(train_ds)}, val={len(val_ds)}"
         )
 
     train_loader = DataLoader(
@@ -598,6 +691,15 @@ def main() -> None:
     LOGGER.info("model_dir=%s", model_dir)
     LOGGER.info("output_dir=%s", run_dir)
     LOGGER.info(
+        "dataset variant=%s windowing=%s history_min=%d history_max=%d stride=%d sampling=%s",
+        variant_name,
+        args.dataset_windowing,
+        history_min,
+        history_max,
+        args.dataset_stride,
+        args.dataset_sampling,
+    )
+    LOGGER.info(
         "early_stopping enabled=%s metric=%s mode=%s patience=%d min_delta=%g",
         args.early_stop_enabled,
         args.early_stop_metric,
@@ -619,7 +721,17 @@ def main() -> None:
         tags=wandb_tags,
         mode=args.wandb_mode,
         config={
-            "history": args.history,
+            "history": history_for_dataset,
+            "dataset/windowing": args.dataset_windowing,
+            "dataset/history": history_for_dataset,
+            "dataset/history_min": history_min,
+            "dataset/history_max": history_max,
+            "dataset/sampling": args.dataset_sampling,
+            "dataset/stride": args.dataset_stride,
+            "dataset_variant": variant_name,
+            "data/windowing_mode": args.dataset_windowing,
+            "data/history_min": history_min,
+            "data/history_max": history_max,
             "max_sequences": args.max_sequences,
             "train_ratio": args.train_ratio,
             "val_ratio": args.val_ratio,
@@ -666,6 +778,9 @@ def main() -> None:
             optimizer,
             show_progress=not args.no_progress,
             desc=f"train e{epoch:03d}",
+            variable_windowing=args.dataset_windowing != "fixed",
+            history_min=history_min,
+            history_max=history_max,
         )
         with TORCH.no_grad():
             val_metrics = run_epoch(
@@ -676,6 +791,9 @@ def main() -> None:
                 optimizer=None,
                 show_progress=not args.no_progress,
                 desc=f"val   e{epoch:03d}",
+                variable_windowing=False,
+                history_min=history_min,
+                history_max=history_max,
             )
 
         epoch_metrics: dict[str, float] = {
@@ -691,7 +809,7 @@ def main() -> None:
                 rollout_metrics_at_horizon(
                     model,
                     z_by_fire=val_sources[0],
-                    history=args.history,
+                    history=history_for_dataset,
                     horizon=monitor_rollout_horizon,
                     device=device,
                 )
@@ -756,6 +874,9 @@ def main() -> None:
             optimizer=None,
             show_progress=not args.no_progress,
             desc="eval train",
+            variable_windowing=False,
+            history_min=history_min,
+            history_max=history_max,
         )
         val_eval = run_epoch(
             model,
@@ -765,11 +886,14 @@ def main() -> None:
             optimizer=None,
             show_progress=not args.no_progress,
             desc="eval val",
+            variable_windowing=False,
+            history_min=history_min,
+            history_max=history_max,
         )
     rollout_val = rollout_metrics_at_horizon(
         model,
         z_by_fire=val_sources[0],
-        history=args.history,
+        history=history_for_dataset,
         horizon=10,
         device=device,
     )
@@ -779,11 +903,18 @@ def main() -> None:
         "component": args.component,
         "family": args.family,
         "variant": args.variant,
+        "dataset_variant": variant_name,
+        "dataset/windowing": args.dataset_windowing,
+        "dataset/history": history_for_dataset,
+        "dataset/history_min": history_min,
+        "dataset/history_max": history_max,
+        "dataset/sampling": args.dataset_sampling,
+        "dataset/stride": args.dataset_stride,
         "timestamp": timestamp,
         "model_dir": str(model_dir),
         "output_root": str(args.output_dir),
         "output_dir": str(run_dir),
-        "history": args.history,
+        "history": history_for_dataset,
         "splits": {
             "train_fire_ids": len(train_ids),
             "val_fire_ids": len(val_ids),

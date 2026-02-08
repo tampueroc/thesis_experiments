@@ -2,13 +2,17 @@ component = "latent_predictor"
 family = "lstm"
 variant = "model_01"
 
+dataset_windowing = "fixed"
+dataset_history = 5
+dataset_stride = 1
+dataset_sampling = "random_end_index"
+
 embeddings_root = "/home/tampuero/data/thesis_data/embeddings"
 landscape_dir = "/home/tampuero/data/thesis_data/landscape"
 timestamp = ""
 input_type = "fire_frames"
 embeddings_model_slug = "facebook__dinov2-small"
 
-history = 5
 max_sequences = 256
 train_ratio = 0.7
 val_ratio = 0.15
