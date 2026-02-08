@@ -32,3 +32,10 @@ wandb_entity = ""
 wandb_run_name = ""
 wandb_mode = "online"
 wandb_tags = "wildfire,latent_predictor,lstm,model_01,base"
+
+[early_stopping]
+enabled = true
+metric = "rollout/val/z_mse@10"
+mode = "min"
+patience = 12
+min_delta = 1e-4

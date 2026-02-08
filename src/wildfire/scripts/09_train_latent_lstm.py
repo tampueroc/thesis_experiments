@@ -44,9 +44,14 @@ def parse_args() -> argparse.Namespace:
     )
     pre_args, _ = pre_parser.parse_known_args()
     cfg = load_config(pre_args.config)
+    early_cfg_raw = cfg.get("early_stopping", {})
+    early_cfg = early_cfg_raw if isinstance(early_cfg_raw, dict) else {}
 
     def cfg_value(key: str, default: Any) -> Any:
         return cfg.get(key, default)
+
+    def early_value(key: str, default: Any) -> Any:
+        return early_cfg.get(key, cfg_value(f"early_stop_{key}", default))
 
     parser = argparse.ArgumentParser(
         parents=[pre_parser],
@@ -194,6 +199,41 @@ def parse_args() -> argparse.Namespace:
         default=bool(cfg_value("no_progress", False)),
         help="Disable tqdm progress bars.",
     )
+    parser.add_argument(
+        "--early-stop-metric",
+        default=str(early_value("metric", "val/z_mse")),
+        help="Metric key to monitor for checkpointing/early stopping.",
+    )
+    parser.add_argument(
+        "--early-stop-mode",
+        choices=["min", "max"],
+        default=str(early_value("mode", "min")),
+        help="Whether lower ('min') or higher ('max') monitored metric is better.",
+    )
+    parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=int(early_value("patience", 12)),
+        help="Number of non-improving epochs before stopping.",
+    )
+    parser.add_argument(
+        "--early-stop-min-delta",
+        type=float,
+        default=float(early_value("min_delta", 1e-4)),
+        help="Minimum absolute improvement to count as better.",
+    )
+    parser.add_argument(
+        "--early-stop-enabled",
+        action="store_true",
+        default=bool(early_value("enabled", False)),
+        help="Enable early stopping.",
+    )
+    parser.add_argument(
+        "--no-early-stop",
+        action="store_false",
+        dest="early_stop_enabled",
+        help="Disable early stopping.",
+    )
     return parser.parse_args()
 
 
@@ -243,6 +283,51 @@ def maybe_tqdm(iterable: Any, *, enabled: bool, desc: str) -> Any:
         LOGGER.warning("tqdm not available; continuing without progress bars")
         return iterable
     return tqdm(iterable, desc=desc, leave=True)
+
+
+def is_better(current: float, best: float | None, mode: str, min_delta: float) -> bool:
+    if not np.isfinite(current):
+        return False
+    if best is None:
+        return True
+    if mode == "min":
+        return current < (best - min_delta)
+    return current > (best + min_delta)
+
+
+class EarlyStopper:
+    def __init__(self, mode: str, patience: int, min_delta: float) -> None:
+        if mode not in {"min", "max"}:
+            raise ValueError("early-stop mode must be 'min' or 'max'")
+        if patience < 1:
+            raise ValueError("early-stop patience must be >= 1")
+        if min_delta < 0.0:
+            raise ValueError("early-stop min_delta must be >= 0")
+        self._mode = mode
+        self._patience = patience
+        self._min_delta = min_delta
+        self.best: float | None = None
+        self.bad_epochs = 0
+
+    def update(self, value: float) -> tuple[bool, bool]:
+        improved = is_better(value, self.best, self._mode, self._min_delta)
+        if improved:
+            self.best = value
+            self.bad_epochs = 0
+            return True, False
+        self.bad_epochs += 1
+        return False, self.bad_epochs >= self._patience
+
+
+def required_rollout_horizon(metric_name: str) -> int | None:
+    if not metric_name.startswith("rollout/val/"):
+        return None
+    if "@" not in metric_name:
+        raise ValueError(f"rollout metric must include @<horizon>: {metric_name}")
+    try:
+        return int(metric_name.rsplit("@", maxsplit=1)[1])
+    except ValueError as exc:
+        raise ValueError(f"invalid rollout horizon in metric: {metric_name}") from exc
 
 
 def split_fire_ids(
@@ -512,6 +597,14 @@ def main() -> None:
     LOGGER.info("config_path=%s", args.config if args.config is not None else "")
     LOGGER.info("model_dir=%s", model_dir)
     LOGGER.info("output_dir=%s", run_dir)
+    LOGGER.info(
+        "early_stopping enabled=%s metric=%s mode=%s patience=%d min_delta=%g",
+        args.early_stop_enabled,
+        args.early_stop_metric,
+        args.early_stop_mode,
+        args.early_stop_patience,
+        args.early_stop_min_delta,
+    )
 
     wandb_run_name = args.wandb_run_name if args.wandb_run_name else run_id
     wandb_tags = [x.strip() for x in args.wandb_tags.split(",") if x.strip()]
@@ -550,7 +643,14 @@ def main() -> None:
     )
     wandb_handler.watch_model(model)
 
-    best_val = float("inf")
+    early_stopper = EarlyStopper(
+        mode=args.early_stop_mode,
+        patience=args.early_stop_patience,
+        min_delta=args.early_stop_min_delta,
+    )
+    monitor_metric = args.early_stop_metric
+    monitor_rollout_horizon = required_rollout_horizon(monitor_metric)
+    best_metric_value: float | None = None
     best_epoch = -1
     for epoch in range(1, args.epochs + 1):
         train_metrics = run_epoch(
@@ -573,8 +673,30 @@ def main() -> None:
                 desc=f"val   e{epoch:03d}",
             )
 
+        epoch_metrics: dict[str, float] = {
+            "train/z_mse": train_metrics["z_mse"],
+            "train/z_delta_mse": train_metrics["z_delta_mse"],
+            "train/grad_norm": train_metrics.get("grad_norm", float("nan")),
+            "val/z_mse": val_metrics["z_mse"],
+            "val/z_delta_mse": val_metrics["z_delta_mse"],
+            "val/z_cosine": val_metrics["z_cosine"],
+        }
+        if monitor_rollout_horizon is not None:
+            epoch_metrics.update(
+                rollout_metrics_at_horizon(
+                    model,
+                    z_by_fire=val_sources[0],
+                    history=args.history,
+                    horizon=monitor_rollout_horizon,
+                    device=device,
+                )
+            )
+        if monitor_metric not in epoch_metrics:
+            raise KeyError(f"early-stop metric '{monitor_metric}' is not available in epoch metrics")
+        monitor_value = float(epoch_metrics[monitor_metric])
+
         LOGGER.info(
-            "[epoch %03d] train/z_mse=%.6f train/z_delta_mse=%.6f train/grad_norm=%.6f val/z_mse=%.6f val/z_delta_mse=%.6f val/z_cosine=%.6f (val/best_mse=%.6f)",
+            "[epoch %03d] train/z_mse=%.6f train/z_delta_mse=%.6f train/grad_norm=%.6f val/z_mse=%.6f val/z_delta_mse=%.6f val/z_cosine=%.6f (monitor/best=%.6f)",
             epoch,
             train_metrics["z_mse"],
             train_metrics["z_delta_mse"],
@@ -582,33 +704,39 @@ def main() -> None:
             val_metrics["z_mse"],
             val_metrics["z_delta_mse"],
             val_metrics["z_cosine"],
-            best_val,
+            best_metric_value if best_metric_value is not None else float("nan"),
         )
-        wandb_handler.log_metrics(
-            {
-                "meta/epoch": float(epoch),
-                "train/z_mse": train_metrics["z_mse"],
-                "train/z_delta_mse": train_metrics["z_delta_mse"],
-                "train/grad_norm": train_metrics.get("grad_norm", float("nan")),
-                "val/z_mse": val_metrics["z_mse"],
-                "val/z_delta_mse": val_metrics["z_delta_mse"],
-                "val/z_cosine": val_metrics["z_cosine"],
-                "val/best_mse": min(best_val, val_metrics["z_mse"]),
-            },
-            step=epoch,
-        )
-        if val_metrics["z_mse"] < best_val:
-            best_val = val_metrics["z_mse"]
+        improved, should_stop = early_stopper.update(monitor_value)
+        if best_metric_value is None or improved:
+            best_metric_value = monitor_value
             best_epoch = epoch
             TORCH.save(
                 {
                     "model_state_dict": model.state_dict(),
                     "config": asdict(config),
                     "epoch": epoch,
-                    "val/z_mse": val_metrics["z_mse"],
+                    "monitor_metric": monitor_metric,
+                    "monitor_value": monitor_value,
                 },
                 checkpoint_path,
             )
+        epoch_log = {
+            "meta/epoch": float(epoch),
+            "meta/monitor_value": monitor_value,
+            "meta/monitor_best": best_metric_value if best_metric_value is not None else float("nan"),
+            **epoch_metrics,
+        }
+        wandb_handler.log_metrics(epoch_log, step=epoch)
+        if args.early_stop_enabled and should_stop:
+            LOGGER.info(
+                "early stopping at epoch=%d monitor=%s value=%.6f best=%.6f patience=%d",
+                epoch,
+                monitor_metric,
+                monitor_value,
+                best_metric_value if best_metric_value is not None else float("nan"),
+                args.early_stop_patience,
+            )
+            break
 
     state = TORCH.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(state["model_state_dict"])
@@ -660,7 +788,8 @@ def main() -> None:
             "holdout_samples": len(holdout_ds),
         },
         "best_epoch": best_epoch,
-        "val/z_mse_best": best_val,
+        "monitor_metric": monitor_metric,
+        "monitor_value_best": best_metric_value,
         "metrics": {
             "train/z_mse": train_eval["z_mse"],
             "train/z_delta_mse": train_eval["z_delta_mse"],
@@ -683,7 +812,7 @@ def main() -> None:
             "val/z_mse": val_eval["z_mse"],
             "val/z_delta_mse": val_eval["z_delta_mse"],
             "val/z_cosine": val_eval["z_cosine"],
-            "val/z_mse_best": best_val,
+            "meta/monitor_best": best_metric_value if best_metric_value is not None else float("nan"),
             "meta/best_epoch": float(best_epoch),
             **rollout_val,
         }
