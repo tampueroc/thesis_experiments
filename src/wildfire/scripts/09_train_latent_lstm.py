@@ -79,9 +79,15 @@ def parse_args() -> argparse.Namespace:
         help="Embedding modality to train on.",
     )
     parser.add_argument(
-        "--model-slug",
-        default=cfg_value("model_slug", "facebook__dinov2-small"),
+        "--embeddings-model-slug",
+        default=cfg_value("embeddings_model_slug", cfg_value("model_slug", "facebook__dinov2-small")),
         help="Embedding model slug under modality folder.",
+    )
+    parser.add_argument(
+        "--model-slug",
+        dest="embeddings_model_slug",
+        default=argparse.SUPPRESS,
+        help="Deprecated alias for --embeddings-model-slug.",
     )
     parser.add_argument(
         "--component",
@@ -333,7 +339,7 @@ def main() -> None:
         raise ValueError("history must be >= 1")
 
     timestamp = choose_timestamp(args.embeddings_root, args.timestamp)
-    model_dir = args.embeddings_root / timestamp / args.input_type / args.model_slug
+    model_dir = args.embeddings_root / timestamp / args.input_type / args.embeddings_model_slug
     if not model_dir.exists():
         raise FileNotFoundError(f"embedding model directory not found: {model_dir}")
 
@@ -440,7 +446,7 @@ def main() -> None:
             "dropout": args.dropout,
             "bidirectional": args.bidirectional,
             "input_type": args.input_type,
-            "model_slug": args.model_slug,
+            "embeddings_model_slug": args.embeddings_model_slug,
             "component": args.component,
             "family": args.family,
             "variant": args.variant,

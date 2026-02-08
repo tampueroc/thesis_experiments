@@ -6,7 +6,7 @@ embeddings_root = "/home/tampuero/data/thesis_data/embeddings"
 landscape_dir = "/home/tampuero/data/thesis_data/landscape"
 timestamp = ""
 input_type = "fire_frames"
-model_slug = "facebook__dinov2-small"
+embeddings_model_slug = "facebook__dinov2-small"
 
 history = 5
 max_sequences = 5000
