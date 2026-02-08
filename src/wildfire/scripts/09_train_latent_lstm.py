@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import random
 import tomllib
 from dataclasses import asdict
@@ -18,6 +19,7 @@ from wildfire.logging.wandb_handler import WandbHandler
 from wildfire.model_latent_predictor.model_01 import LSTMConfig, LatentLSTMPredictor
 
 TORCH = cast(Any, torch)
+LOGGER = logging.getLogger("wildfire.train.model_01")
 
 
 def load_config(config_path: Path | None) -> dict[str, Any]:
@@ -183,6 +185,12 @@ def parse_args() -> argparse.Namespace:
         default=cfg_value("wandb_tags", ""),
         help="Comma-separated W&B tags.",
     )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        default=bool(cfg_value("no_progress", False)),
+        help="Disable tqdm progress bars.",
+    )
     return parser.parse_args()
 
 
@@ -205,6 +213,33 @@ def make_run_id(
 ) -> str:
     launch_time = datetime.now().strftime("%Y%m%d-%H%M%S")
     return f"{component}-{family}-{variant}-{timestamp}-s{seed}-{launch_time}"
+
+
+def setup_logging(run_dir: Path) -> None:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_path = run_dir / "train.log"
+    LOGGER.setLevel(logging.INFO)
+    LOGGER.handlers.clear()
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    LOGGER.addHandler(stream_handler)
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    LOGGER.addHandler(file_handler)
+
+
+def maybe_tqdm(iterable: Any, *, enabled: bool, desc: str) -> Any:
+    if not enabled:
+        return iterable
+    try:
+        from tqdm import tqdm
+    except Exception:
+        LOGGER.warning("tqdm not available; continuing without progress bars")
+        return iterable
+    return tqdm(iterable, desc=desc, leave=False)
 
 
 def split_fire_ids(
@@ -269,13 +304,15 @@ def run_epoch(
     loss_fn: Any,
     device: Any,
     optimizer: Any | None,
+    show_progress: bool,
+    desc: str,
 ) -> float:
     training = optimizer is not None
     model.train(training)
 
     total_loss = 0.0
     total_items = 0
-    for batch in loader:
+    for batch in maybe_tqdm(loader, enabled=show_progress, desc=desc):
         z_in = batch["z_in"].to(device)
         z_target = batch["z_target"].to(device)
 
@@ -396,8 +433,12 @@ def main() -> None:
         seed=args.seed,
     )
     run_dir = args.output_dir / args.component / args.family / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    setup_logging(run_dir)
     checkpoint_path = run_dir / "best_model.pt"
+    LOGGER.info("run_id=%s", run_id)
+    LOGGER.info("config_path=%s", args.config if args.config is not None else "")
+    LOGGER.info("model_dir=%s", model_dir)
+    LOGGER.info("output_dir=%s", run_dir)
 
     wandb_run_name = args.wandb_run_name if args.wandb_run_name else run_id
     wandb_tags = [x.strip() for x in args.wandb_tags.split(",") if x.strip()]
@@ -439,13 +480,32 @@ def main() -> None:
     best_val = float("inf")
     best_epoch = -1
     for epoch in range(1, args.epochs + 1):
-        train_loss = run_epoch(model, train_loader, loss_fn, device, optimizer)
+        train_loss = run_epoch(
+            model,
+            train_loader,
+            loss_fn,
+            device,
+            optimizer,
+            show_progress=not args.no_progress,
+            desc=f"train e{epoch:03d}",
+        )
         with TORCH.no_grad():
-            val_loss = run_epoch(model, val_loader, loss_fn, device, optimizer=None)
+            val_loss = run_epoch(
+                model,
+                val_loader,
+                loss_fn,
+                device,
+                optimizer=None,
+                show_progress=not args.no_progress,
+                desc=f"val   e{epoch:03d}",
+            )
 
-        print(
-            f"[epoch {epoch:03d}] train_mse={train_loss:.6f} val_mse={val_loss:.6f} "
-            f"(best_val={best_val:.6f})"
+        LOGGER.info(
+            "[epoch %03d] train_mse=%.6f val_mse=%.6f (best_val=%.6f)",
+            epoch,
+            train_loss,
+            val_loss,
+            best_val,
         )
         wandb_handler.log_metrics(
             {
@@ -474,9 +534,33 @@ def main() -> None:
     model.eval()
 
     with TORCH.no_grad():
-        train_mse = run_epoch(model, train_loader, loss_fn, device, optimizer=None)
-        val_mse = run_epoch(model, val_loader, loss_fn, device, optimizer=None)
-        test_mse = run_epoch(model, test_loader, loss_fn, device, optimizer=None)
+        train_mse = run_epoch(
+            model,
+            train_loader,
+            loss_fn,
+            device,
+            optimizer=None,
+            show_progress=not args.no_progress,
+            desc="eval train",
+        )
+        val_mse = run_epoch(
+            model,
+            val_loader,
+            loss_fn,
+            device,
+            optimizer=None,
+            show_progress=not args.no_progress,
+            desc="eval val",
+        )
+        test_mse = run_epoch(
+            model,
+            test_loader,
+            loss_fn,
+            device,
+            optimizer=None,
+            show_progress=not args.no_progress,
+            desc="eval test",
+        )
 
     summary = {
         "run_id": run_id,
@@ -523,11 +607,13 @@ def main() -> None:
     wandb_handler.log_summary(summary)
     wandb_handler.finish()
 
-    print(f"[ok] checkpoint={checkpoint_path}")
-    print(f"[ok] metrics={summary_path}")
-    print(
-        f"[ok] final train_mse={train_mse:.6f} val_mse={val_mse:.6f} "
-        f"test_mse={test_mse:.6f}"
+    LOGGER.info("checkpoint=%s", checkpoint_path)
+    LOGGER.info("metrics=%s", summary_path)
+    LOGGER.info(
+        "final train_mse=%.6f val_mse=%.6f test_mse=%.6f",
+        train_mse,
+        val_mse,
+        test_mse,
     )
 
 
