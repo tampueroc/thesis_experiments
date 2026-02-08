@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import tomllib
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -18,8 +20,34 @@ from wildfire.model_latent_predictor.model_01 import LSTMConfig, LatentLSTMPredi
 TORCH = cast(Any, torch)
 
 
+def load_config(config_path: Path | None) -> dict[str, Any]:
+    if config_path is None:
+        return {}
+    if not config_path.exists():
+        raise FileNotFoundError(f"config file not found: {config_path}")
+    with config_path.open("rb") as fh:
+        raw = tomllib.load(fh)
+    if not isinstance(raw, dict):
+        raise ValueError(f"config must be a TOML table at top level: {config_path}")
+    return raw
+
+
 def parse_args() -> argparse.Namespace:
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Optional TOML config file. CLI flags override config values.",
+    )
+    pre_args, _ = pre_parser.parse_known_args()
+    cfg = load_config(pre_args.config)
+
+    def cfg_value(key: str, default: Any) -> Any:
+        return cfg.get(key, default)
+
     parser = argparse.ArgumentParser(
+        parents=[pre_parser],
         description=(
             "Train LatentLSTMPredictor on sequence embeddings with fire_id-level "
             "train/val/test split."
@@ -28,100 +56,131 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--embeddings-root",
         type=Path,
-        default=Path("/home/tampuero/data/thesis_data/embeddings"),
+        default=Path(cfg_value("embeddings_root", "/home/tampuero/data/thesis_data/embeddings")),
         help="Root folder containing timestamped embeddings outputs.",
     )
     parser.add_argument(
         "--landscape-dir",
         type=Path,
-        default=Path("/home/tampuero/data/thesis_data/landscape"),
+        default=Path(cfg_value("landscape_dir", "/home/tampuero/data/thesis_data/landscape")),
         help="Landscape folder containing WeatherHistory.csv, Weathers/, and indices.json.",
     )
     parser.add_argument(
         "--timestamp",
-        default="",
+        default=cfg_value("timestamp", ""),
         help="Specific embedding timestamp folder. If omitted, uses latest lexicographic timestamp.",
     )
     parser.add_argument(
         "--input-type",
         choices=["fire_frames", "isochrones"],
-        default="fire_frames",
+        default=cfg_value("input_type", "fire_frames"),
         help="Embedding modality to train on.",
     )
     parser.add_argument(
         "--model-slug",
-        default="facebook__dinov2-small",
+        default=cfg_value("model_slug", "facebook__dinov2-small"),
         help="Embedding model slug under modality folder.",
     )
-    parser.add_argument("--history", type=int, default=5, help="History window length.")
+    parser.add_argument(
+        "--component",
+        default=cfg_value("component", "latent_predictor"),
+        help="Top-level model component (for example latent_predictor, latent_decoder).",
+    )
+    parser.add_argument(
+        "--family",
+        default=cfg_value("family", "lstm"),
+        help="Architecture family (for example lstm, transformer, mlp).",
+    )
+    parser.add_argument(
+        "--variant",
+        default=cfg_value("variant", "model_01"),
+        help="Model variant identifier.",
+    )
+    parser.add_argument(
+        "--history", type=int, default=int(cfg_value("history", 5)), help="History window length."
+    )
     parser.add_argument(
         "--max-sequences",
         type=int,
-        default=5000,
+        default=int(cfg_value("max_sequences", 5000)),
         help="Maximum number of manifest sequences to load.",
     )
-    parser.add_argument("--train-ratio", type=float, default=0.7, help="Train split ratio.")
-    parser.add_argument("--val-ratio", type=float, default=0.15, help="Validation split ratio.")
-    parser.add_argument("--test-ratio", type=float, default=0.15, help="Test split ratio.")
-    parser.add_argument("--seed", type=int, default=7, help="Random seed for split and training.")
-    parser.add_argument("--batch-size", type=int, default=32, help="Batch size.")
-    parser.add_argument("--epochs", type=int, default=20, help="Number of training epochs.")
-    parser.add_argument("--learning-rate", type=float, default=1e-3, help="Adam learning rate.")
-    parser.add_argument("--hidden-dim", type=int, default=256, help="LSTM hidden size.")
-    parser.add_argument("--num-layers", type=int, default=2, help="LSTM layer count.")
-    parser.add_argument("--dropout", type=float, default=0.1, help="LSTM dropout for stacked LSTM.")
+    parser.add_argument(
+        "--train-ratio", type=float, default=float(cfg_value("train_ratio", 0.7)), help="Train split ratio."
+    )
+    parser.add_argument(
+        "--val-ratio", type=float, default=float(cfg_value("val_ratio", 0.15)), help="Validation split ratio."
+    )
+    parser.add_argument(
+        "--test-ratio", type=float, default=float(cfg_value("test_ratio", 0.15)), help="Test split ratio."
+    )
+    parser.add_argument(
+        "--seed", type=int, default=int(cfg_value("seed", 7)), help="Random seed for split and training."
+    )
+    parser.add_argument("--batch-size", type=int, default=int(cfg_value("batch_size", 32)), help="Batch size.")
+    parser.add_argument("--epochs", type=int, default=int(cfg_value("epochs", 20)), help="Number of training epochs.")
+    parser.add_argument(
+        "--learning-rate", type=float, default=float(cfg_value("learning_rate", 1e-3)), help="Adam learning rate."
+    )
+    parser.add_argument("--hidden-dim", type=int, default=int(cfg_value("hidden_dim", 256)), help="LSTM hidden size.")
+    parser.add_argument("--num-layers", type=int, default=int(cfg_value("num_layers", 2)), help="LSTM layer count.")
+    parser.add_argument(
+        "--dropout", type=float, default=float(cfg_value("dropout", 0.1)), help="LSTM dropout for stacked LSTM."
+    )
     parser.add_argument(
         "--bidirectional",
         action="store_true",
+        default=bool(cfg_value("bidirectional", False)),
         help="Use bidirectional LSTM.",
     )
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=0,
+        default=int(cfg_value("num_workers", 0)),
         help="Dataloader worker count.",
     )
     parser.add_argument(
         "--device",
-        default="auto",
+        default=cfg_value("device", "auto"),
         choices=["auto", "cpu", "cuda", "mps"],
         help="Training device.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("artifacts/wildfire/model_01"),
+        default=Path(cfg_value("output_dir", "artifacts/wildfire")),
         help="Directory to store best checkpoint and metrics.",
     )
     parser.add_argument(
         "--wandb",
         action="store_true",
+        default=bool(cfg_value("wandb", False)),
         help="Enable Weights & Biases logging.",
     )
     parser.add_argument(
         "--wandb-project",
-        default="wildfire-latent-lstm",
+        default=cfg_value("wandb_project", "latent_wildfire"),
         help="W&B project name.",
     )
     parser.add_argument(
         "--wandb-entity",
-        default="",
+        default=cfg_value("wandb_entity", ""),
         help="W&B entity/team (optional).",
     )
     parser.add_argument(
         "--wandb-run-name",
-        default="",
+        default=cfg_value("wandb_run_name", ""),
         help="W&B run name. If empty, generated from timestamp and model slug.",
     )
     parser.add_argument(
         "--wandb-mode",
         choices=["online", "offline", "disabled"],
-        default="online",
+        default=cfg_value("wandb_mode", "online"),
         help="W&B mode for run syncing.",
     )
     parser.add_argument(
         "--wandb-tags",
-        default="wildfire,lstm,model_01",
+        default=cfg_value("wandb_tags", ""),
         help="Comma-separated W&B tags.",
     )
     return parser.parse_args()
@@ -135,6 +194,17 @@ def resolve_device(device_name: str) -> Any:
             return TORCH.device("mps")
         return TORCH.device("cpu")
     return TORCH.device(device_name)
+
+
+def make_run_id(
+    component: str,
+    family: str,
+    variant: str,
+    timestamp: str,
+    seed: int,
+) -> str:
+    launch_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"{component}-{family}-{variant}-{timestamp}-s{seed}-{launch_time}"
 
 
 def split_fire_ids(
@@ -318,21 +388,27 @@ def main() -> None:
     optimizer = TORCH.optim.Adam(model.parameters(), lr=args.learning_rate)
     loss_fn = TORCH.nn.MSELoss()
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = args.output_dir / "best_model.pt"
-
-    wandb_run_name = (
-        args.wandb_run_name
-        if args.wandb_run_name
-        else f"{timestamp}-{args.input_type}-{args.model_slug}-h{args.history}"
+    run_id = make_run_id(
+        component=args.component,
+        family=args.family,
+        variant=args.variant,
+        timestamp=timestamp,
+        seed=args.seed,
     )
+    run_dir = args.output_dir / args.component / args.family / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = run_dir / "best_model.pt"
+
+    wandb_run_name = args.wandb_run_name if args.wandb_run_name else run_id
     wandb_tags = [x.strip() for x in args.wandb_tags.split(",") if x.strip()]
+    if not wandb_tags:
+        wandb_tags = ["wildfire", args.component, args.family, args.variant]
     wandb_handler = WandbHandler(
         enabled=args.wandb and args.wandb_mode != "disabled",
         project=args.wandb_project,
         entity=args.wandb_entity,
         run_name=wandb_run_name,
-        output_dir=args.output_dir,
+        output_dir=run_dir,
         tags=wandb_tags,
         mode=args.wandb_mode,
         config={
@@ -351,6 +427,9 @@ def main() -> None:
             "bidirectional": args.bidirectional,
             "input_type": args.input_type,
             "model_slug": args.model_slug,
+            "component": args.component,
+            "family": args.family,
+            "variant": args.variant,
             "timestamp": timestamp,
             "device": str(device),
         },
@@ -400,8 +479,15 @@ def main() -> None:
         test_mse = run_epoch(model, test_loader, loss_fn, device, optimizer=None)
 
     summary = {
+        "run_id": run_id,
+        "config_path": str(args.config) if args.config is not None else "",
+        "component": args.component,
+        "family": args.family,
+        "variant": args.variant,
         "timestamp": timestamp,
         "model_dir": str(model_dir),
+        "output_root": str(args.output_dir),
+        "output_dir": str(run_dir),
         "history": args.history,
         "splits": {
             "train_fire_ids": len(train_ids),
@@ -423,7 +509,7 @@ def main() -> None:
         "checkpoint": str(checkpoint_path),
     }
 
-    summary_path = args.output_dir / "metrics.json"
+    summary_path = run_dir / "metrics.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     wandb_handler.log_metrics(
         {

@@ -1,0 +1,36 @@
+component = "latent_decoder"
+family = "<family_name>"
+variant = "model_01"
+
+# Fill these based on decoder training pipeline once implemented.
+embeddings_root = "/home/tampuero/data/thesis_data/embeddings"
+landscape_dir = "/home/tampuero/data/thesis_data/landscape"
+timestamp = ""
+input_type = "fire_frames"
+model_slug = "facebook__dinov2-small"
+
+history = 5
+max_sequences = 5000
+train_ratio = 0.7
+val_ratio = 0.15
+test_ratio = 0.15
+seed = 7
+
+batch_size = 32
+epochs = 20
+learning_rate = 0.001
+hidden_dim = 256
+num_layers = 2
+dropout = 0.1
+bidirectional = false
+num_workers = 0
+device = "auto"
+
+output_dir = "artifacts/wildfire"
+
+wandb = true
+wandb_project = "latent_wildfire"
+wandb_entity = ""
+wandb_run_name = ""
+wandb_mode = "online"
+wandb_tags = "wildfire,latent_decoder,<family_name>,model_01"
