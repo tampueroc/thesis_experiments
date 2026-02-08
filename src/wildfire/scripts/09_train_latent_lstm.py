@@ -110,8 +110,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-sequences",
         type=int,
-        default=int(cfg_value("max_sequences", 5000)),
-        help="Maximum number of manifest sequences to load.",
+        default=int(cfg_value("max_sequences", 0)),
+        help="Maximum number of manifest sequences to load. Use 0 for all sequences.",
     )
     parser.add_argument(
         "--train-ratio", type=float, default=float(cfg_value("train_ratio", 0.7)), help="Train split ratio."

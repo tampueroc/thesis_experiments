@@ -10,7 +10,7 @@ input_type = "fire_frames"
 embeddings_model_slug = "facebook__dinov2-small"
 
 history = 5
-max_sequences = 5000
+max_sequences = 0
 train_ratio = 0.7
 val_ratio = 0.15
 seed = 7

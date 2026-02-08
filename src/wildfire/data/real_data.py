@@ -181,7 +181,8 @@ def build_sources(
     w_by_fire: dict[str, np.ndarray] = {}
     g_by_fire: dict[str, np.ndarray] = {}
 
-    for seq in sequences[:max_sequences]:
+    selected_sequences = sequences if max_sequences <= 0 else sequences[:max_sequences]
+    for seq in selected_sequences:
         sequence_id = seq["sequence_id"]
         sequence_num = parse_sequence_num(sequence_id)
         z = np.asarray(np.load(seq["sequence_path"]), dtype=np.float32)
