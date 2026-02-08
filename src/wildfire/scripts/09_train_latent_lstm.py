@@ -12,6 +12,7 @@ import torch
 from torch.utils.data import DataLoader
 from wildfire.data.dataset import WildfireSequenceDataset
 from wildfire.data.real_data import build_sources, choose_timestamp
+from wildfire.logging.wandb_handler import WandbHandler
 from wildfire.model_latent_predictor.model_01 import LSTMConfig, LatentLSTMPredictor
 
 TORCH = cast(Any, torch)
@@ -91,6 +92,37 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("artifacts/wildfire/model_01"),
         help="Directory to store best checkpoint and metrics.",
+    )
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help="Enable Weights & Biases logging.",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        default="wildfire-latent-lstm",
+        help="W&B project name.",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        default="",
+        help="W&B entity/team (optional).",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        default="",
+        help="W&B run name. If empty, generated from timestamp and model slug.",
+    )
+    parser.add_argument(
+        "--wandb-mode",
+        choices=["online", "offline", "disabled"],
+        default="online",
+        help="W&B mode for run syncing.",
+    )
+    parser.add_argument(
+        "--wandb-tags",
+        default="wildfire,lstm,model_01",
+        help="Comma-separated W&B tags.",
     )
     return parser.parse_args()
 
@@ -289,6 +321,42 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = args.output_dir / "best_model.pt"
 
+    wandb_run_name = (
+        args.wandb_run_name
+        if args.wandb_run_name
+        else f"{timestamp}-{args.input_type}-{args.model_slug}-h{args.history}"
+    )
+    wandb_tags = [x.strip() for x in args.wandb_tags.split(",") if x.strip()]
+    wandb_handler = WandbHandler(
+        enabled=args.wandb and args.wandb_mode != "disabled",
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        run_name=wandb_run_name,
+        output_dir=args.output_dir,
+        tags=wandb_tags,
+        mode=args.wandb_mode,
+        config={
+            "history": args.history,
+            "max_sequences": args.max_sequences,
+            "train_ratio": args.train_ratio,
+            "val_ratio": args.val_ratio,
+            "test_ratio": args.test_ratio,
+            "seed": args.seed,
+            "batch_size": args.batch_size,
+            "epochs": args.epochs,
+            "learning_rate": args.learning_rate,
+            "hidden_dim": args.hidden_dim,
+            "num_layers": args.num_layers,
+            "dropout": args.dropout,
+            "bidirectional": args.bidirectional,
+            "input_type": args.input_type,
+            "model_slug": args.model_slug,
+            "timestamp": timestamp,
+            "device": str(device),
+        },
+    )
+    wandb_handler.watch_model(model)
+
     best_val = float("inf")
     best_epoch = -1
     for epoch in range(1, args.epochs + 1):
@@ -299,6 +367,15 @@ def main() -> None:
         print(
             f"[epoch {epoch:03d}] train_mse={train_loss:.6f} val_mse={val_loss:.6f} "
             f"(best_val={best_val:.6f})"
+        )
+        wandb_handler.log_metrics(
+            {
+                "epoch": float(epoch),
+                "train_mse": train_loss,
+                "val_mse": val_loss,
+                "best_val_mse": min(best_val, val_loss),
+            },
+            step=epoch,
         )
         if val_loss < best_val:
             best_val = val_loss
@@ -348,6 +425,17 @@ def main() -> None:
 
     summary_path = args.output_dir / "metrics.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    wandb_handler.log_metrics(
+        {
+            "final_train_mse": train_mse,
+            "final_val_mse": val_mse,
+            "final_test_mse": test_mse,
+            "best_epoch": float(best_epoch),
+            "best_val_mse": best_val,
+        }
+    )
+    wandb_handler.log_summary(summary)
+    wandb_handler.finish()
 
     print(f"[ok] checkpoint={checkpoint_path}")
     print(f"[ok] metrics={summary_path}")
