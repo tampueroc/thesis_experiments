@@ -313,6 +313,7 @@ def run_epoch(
 
     total_z_mse = 0.0
     total_z_delta_mse = 0.0
+    total_z_cosine = 0.0
     total_items = 0
     grad_norm_sum = 0.0
     grad_norm_steps = 0
@@ -331,6 +332,8 @@ def run_epoch(
         z_delta_pred = preds - z_prev
         z_delta_true = z_target - z_prev
         z_delta_mse = loss_fn(z_delta_pred, z_delta_true)
+        cosine = TORCH.nn.functional.cosine_similarity(preds, z_target, dim=1)
+        z_cosine = TORCH.mean(cosine)
         loss = z_mse
 
         if training:
@@ -350,6 +353,7 @@ def run_epoch(
         batch_items = z_in.shape[0]
         total_z_mse += float(z_mse.item()) * batch_items
         total_z_delta_mse += float(z_delta_mse.item()) * batch_items
+        total_z_cosine += float(z_cosine.item()) * batch_items
         total_items += int(batch_items)
 
     if total_items == 0:
@@ -357,6 +361,7 @@ def run_epoch(
     metrics = {
         "z_mse": total_z_mse / total_items,
         "z_delta_mse": total_z_delta_mse / total_items,
+        "z_cosine": total_z_cosine / total_items,
     }
     if training:
         metrics["grad_norm"] = grad_norm_sum / max(1, grad_norm_steps)
@@ -373,6 +378,7 @@ def rollout_metrics_at_horizon(
     model.eval()
     total_mse = 0.0
     total_norm = 0.0
+    total_cosine = 0.0
     total_count = 0
     with TORCH.no_grad():
         for z in z_by_fire.values():
@@ -393,17 +399,21 @@ def rollout_metrics_at_horizon(
                 gt = TORCH.tensor(z[target_t + horizon - 1], dtype=TORCH.float32, device=device).unsqueeze(0)
                 mse = TORCH.mean((pred - gt) ** 2)
                 norm = TORCH.norm(pred, dim=1).mean()
+                cosine = TORCH.nn.functional.cosine_similarity(pred, gt, dim=1).mean()
                 total_mse += float(mse.item())
                 total_norm += float(norm.item())
+                total_cosine += float(cosine.item())
                 total_count += 1
     if total_count == 0:
         return {
             f"rollout/val/z_mse@{horizon}": float("nan"),
             f"rollout/val/z_norm_mean@{horizon}": float("nan"),
+            f"rollout/val/z_cosine@{horizon}": float("nan"),
         }
     return {
         f"rollout/val/z_mse@{horizon}": total_mse / total_count,
         f"rollout/val/z_norm_mean@{horizon}": total_norm / total_count,
+        f"rollout/val/z_cosine@{horizon}": total_cosine / total_count,
     }
 
 
@@ -564,13 +574,14 @@ def main() -> None:
             )
 
         LOGGER.info(
-            "[epoch %03d] train/z_mse=%.6f train/z_delta_mse=%.6f train/grad_norm=%.6f val/z_mse=%.6f val/z_delta_mse=%.6f (val/best_mse=%.6f)",
+            "[epoch %03d] train/z_mse=%.6f train/z_delta_mse=%.6f train/grad_norm=%.6f val/z_mse=%.6f val/z_delta_mse=%.6f val/z_cosine=%.6f (val/best_mse=%.6f)",
             epoch,
             train_metrics["z_mse"],
             train_metrics["z_delta_mse"],
             train_metrics.get("grad_norm", float("nan")),
             val_metrics["z_mse"],
             val_metrics["z_delta_mse"],
+            val_metrics["z_cosine"],
             best_val,
         )
         wandb_handler.log_metrics(
@@ -581,6 +592,7 @@ def main() -> None:
                 "train/grad_norm": train_metrics.get("grad_norm", float("nan")),
                 "val/z_mse": val_metrics["z_mse"],
                 "val/z_delta_mse": val_metrics["z_delta_mse"],
+                "val/z_cosine": val_metrics["z_cosine"],
                 "val/best_mse": min(best_val, val_metrics["z_mse"]),
             },
             step=epoch,
@@ -654,6 +666,7 @@ def main() -> None:
             "train/z_delta_mse": train_eval["z_delta_mse"],
             "val/z_mse": val_eval["z_mse"],
             "val/z_delta_mse": val_eval["z_delta_mse"],
+            "val/z_cosine": val_eval["z_cosine"],
             **rollout_val,
         },
         "device": str(device),
@@ -669,6 +682,7 @@ def main() -> None:
             "train/z_delta_mse": train_eval["z_delta_mse"],
             "val/z_mse": val_eval["z_mse"],
             "val/z_delta_mse": val_eval["z_delta_mse"],
+            "val/z_cosine": val_eval["z_cosine"],
             "val/z_mse_best": best_val,
             "meta/best_epoch": float(best_epoch),
             **rollout_val,
@@ -680,11 +694,12 @@ def main() -> None:
     LOGGER.info("checkpoint=%s", checkpoint_path)
     LOGGER.info("metrics=%s", summary_path)
     LOGGER.info(
-        "final train/z_mse=%.6f train/z_delta_mse=%.6f val/z_mse=%.6f val/z_delta_mse=%.6f",
+        "final train/z_mse=%.6f train/z_delta_mse=%.6f val/z_mse=%.6f val/z_delta_mse=%.6f val/z_cosine=%.6f",
         train_eval["z_mse"],
         train_eval["z_delta_mse"],
         val_eval["z_mse"],
         val_eval["z_delta_mse"],
+        val_eval["z_cosine"],
     )
 
 
