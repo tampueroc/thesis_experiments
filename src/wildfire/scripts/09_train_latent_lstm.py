@@ -307,12 +307,15 @@ def run_epoch(
     optimizer: Any | None,
     show_progress: bool,
     desc: str,
-) -> float:
+) -> dict[str, float]:
     training = optimizer is not None
     model.train(training)
 
-    total_loss = 0.0
+    total_z_mse = 0.0
+    total_z_delta_mse = 0.0
     total_items = 0
+    grad_norm_sum = 0.0
+    grad_norm_steps = 0
     for batch in maybe_tqdm(loader, enabled=show_progress, desc=desc):
         z_in = batch["z_in"].to(device)
         z_target = batch["z_target"].to(device)
@@ -323,21 +326,85 @@ def run_epoch(
             optimizer.zero_grad(set_to_none=True)
 
         preds = model(z_in)
-        loss = loss_fn(preds, z_target)
+        z_mse = loss_fn(preds, z_target)
+        z_prev = z_in[:, -1, :]
+        z_delta_pred = preds - z_prev
+        z_delta_true = z_target - z_prev
+        z_delta_mse = loss_fn(z_delta_pred, z_delta_true)
+        loss = z_mse
 
         if training:
             if optimizer is None:
                 raise RuntimeError("optimizer is required during training")
             loss.backward()
+            grad_norm_sq = 0.0
+            for param in model.parameters():
+                grad = param.grad
+                if grad is None:
+                    continue
+                grad_norm_sq += float(grad.detach().pow(2).sum().item())
+            grad_norm_sum += grad_norm_sq**0.5
+            grad_norm_steps += 1
             optimizer.step()
 
         batch_items = z_in.shape[0]
-        total_loss += float(loss.item()) * batch_items
+        total_z_mse += float(z_mse.item()) * batch_items
+        total_z_delta_mse += float(z_delta_mse.item()) * batch_items
         total_items += int(batch_items)
 
     if total_items == 0:
         raise RuntimeError("dataloader yielded zero items")
-    return total_loss / total_items
+    metrics = {
+        "z_mse": total_z_mse / total_items,
+        "z_delta_mse": total_z_delta_mse / total_items,
+    }
+    if training:
+        metrics["grad_norm"] = grad_norm_sum / max(1, grad_norm_steps)
+    return metrics
+
+
+def rollout_metrics_at_horizon(
+    model: LatentLSTMPredictor,
+    z_by_fire: dict[str, np.ndarray],
+    history: int,
+    horizon: int,
+    device: Any,
+) -> dict[str, float]:
+    model.eval()
+    total_mse = 0.0
+    total_norm = 0.0
+    total_count = 0
+    with TORCH.no_grad():
+        for z in z_by_fire.values():
+            if z.ndim != 2:
+                continue
+            timesteps = int(z.shape[0])
+            if timesteps < history + horizon:
+                continue
+            for target_t in range(history, timesteps - horizon + 1):
+                window = z[target_t - history : target_t]
+                window_t = TORCH.tensor(window, dtype=TORCH.float32, device=device).unsqueeze(0)
+                pred = None
+                for _step in range(horizon):
+                    pred = model(window_t)
+                    window_t = TORCH.cat([window_t[:, 1:, :], pred.unsqueeze(1)], dim=1)
+                if pred is None:
+                    continue
+                gt = TORCH.tensor(z[target_t + horizon - 1], dtype=TORCH.float32, device=device).unsqueeze(0)
+                mse = TORCH.mean((pred - gt) ** 2)
+                norm = TORCH.norm(pred, dim=1).mean()
+                total_mse += float(mse.item())
+                total_norm += float(norm.item())
+                total_count += 1
+    if total_count == 0:
+        return {
+            f"rollout/val/z_mse@{horizon}": float("nan"),
+            f"rollout/val/z_norm_mean@{horizon}": float("nan"),
+        }
+    return {
+        f"rollout/val/z_mse@{horizon}": total_mse / total_count,
+        f"rollout/val/z_norm_mean@{horizon}": total_norm / total_count,
+    }
 
 
 def main() -> None:
@@ -367,13 +434,22 @@ def main() -> None:
         seed=args.seed,
     )
 
+    train_sources = select_sources(z_by_fire, w_by_fire, g_by_fire, train_ids)
+    val_sources = select_sources(z_by_fire, w_by_fire, g_by_fire, val_ids)
+    holdout_sources = select_sources(z_by_fire, w_by_fire, g_by_fire, holdout_ids)
+
     train_ds = WildfireSequenceDataset(
-        *select_sources(z_by_fire, w_by_fire, g_by_fire, train_ids),
+        *train_sources,
         history=args.history,
         return_tensors=True,
     )
     val_ds = WildfireSequenceDataset(
-        *select_sources(z_by_fire, w_by_fire, g_by_fire, val_ids),
+        *val_sources,
+        history=args.history,
+        return_tensors=True,
+    )
+    holdout_ds = WildfireSequenceDataset(
+        *holdout_sources,
         history=args.history,
         return_tensors=True,
     )
@@ -467,7 +543,7 @@ def main() -> None:
     best_val = float("inf")
     best_epoch = -1
     for epoch in range(1, args.epochs + 1):
-        train_loss = run_epoch(
+        train_metrics = run_epoch(
             model,
             train_loader,
             loss_fn,
@@ -477,7 +553,7 @@ def main() -> None:
             desc=f"train e{epoch:03d}",
         )
         with TORCH.no_grad():
-            val_loss = run_epoch(
+            val_metrics = run_epoch(
                 model,
                 val_loader,
                 loss_fn,
@@ -488,30 +564,36 @@ def main() -> None:
             )
 
         LOGGER.info(
-            "[epoch %03d] train/mse=%.6f val/mse=%.6f (val/best_mse=%.6f)",
+            "[epoch %03d] train/z_mse=%.6f train/z_delta_mse=%.6f train/grad_norm=%.6f val/z_mse=%.6f val/z_delta_mse=%.6f (val/best_mse=%.6f)",
             epoch,
-            train_loss,
-            val_loss,
+            train_metrics["z_mse"],
+            train_metrics["z_delta_mse"],
+            train_metrics.get("grad_norm", float("nan")),
+            val_metrics["z_mse"],
+            val_metrics["z_delta_mse"],
             best_val,
         )
         wandb_handler.log_metrics(
             {
                 "meta/epoch": float(epoch),
-                "train/mse": train_loss,
-                "val/mse": val_loss,
-                "val/best_mse": min(best_val, val_loss),
+                "train/z_mse": train_metrics["z_mse"],
+                "train/z_delta_mse": train_metrics["z_delta_mse"],
+                "train/grad_norm": train_metrics.get("grad_norm", float("nan")),
+                "val/z_mse": val_metrics["z_mse"],
+                "val/z_delta_mse": val_metrics["z_delta_mse"],
+                "val/best_mse": min(best_val, val_metrics["z_mse"]),
             },
             step=epoch,
         )
-        if val_loss < best_val:
-            best_val = val_loss
+        if val_metrics["z_mse"] < best_val:
+            best_val = val_metrics["z_mse"]
             best_epoch = epoch
             TORCH.save(
                 {
                     "model_state_dict": model.state_dict(),
                     "config": asdict(config),
                     "epoch": epoch,
-                    "val/mse": val_loss,
+                    "val/z_mse": val_metrics["z_mse"],
                 },
                 checkpoint_path,
             )
@@ -521,7 +603,7 @@ def main() -> None:
     model.eval()
 
     with TORCH.no_grad():
-        train_mse = run_epoch(
+        train_eval = run_epoch(
             model,
             train_loader,
             loss_fn,
@@ -530,7 +612,7 @@ def main() -> None:
             show_progress=not args.no_progress,
             desc="eval train",
         )
-        val_mse = run_epoch(
+        val_eval = run_epoch(
             model,
             val_loader,
             loss_fn,
@@ -539,6 +621,13 @@ def main() -> None:
             show_progress=not args.no_progress,
             desc="eval val",
         )
+    rollout_val = rollout_metrics_at_horizon(
+        model,
+        z_by_fire=val_sources[0],
+        history=args.history,
+        horizon=10,
+        device=device,
+    )
     summary = {
         "run_id": run_id,
         "config_path": str(args.config) if args.config is not None else "",
@@ -556,12 +645,16 @@ def main() -> None:
             "holdout_fire_ids": len(holdout_ids),
             "train_samples": len(train_ds),
             "val_samples": len(val_ds),
+            "holdout_samples": len(holdout_ds),
         },
         "best_epoch": best_epoch,
-        "val/best_mse": best_val,
+        "val/z_mse_best": best_val,
         "metrics": {
-            "train/mse": train_mse,
-            "val/mse": val_mse,
+            "train/z_mse": train_eval["z_mse"],
+            "train/z_delta_mse": train_eval["z_delta_mse"],
+            "val/z_mse": val_eval["z_mse"],
+            "val/z_delta_mse": val_eval["z_delta_mse"],
+            **rollout_val,
         },
         "device": str(device),
         "config": asdict(config),
@@ -572,10 +665,13 @@ def main() -> None:
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     wandb_handler.log_metrics(
         {
-            "train/mse": train_mse,
-            "val/mse": val_mse,
-            "val/best_mse": best_val,
+            "train/z_mse": train_eval["z_mse"],
+            "train/z_delta_mse": train_eval["z_delta_mse"],
+            "val/z_mse": val_eval["z_mse"],
+            "val/z_delta_mse": val_eval["z_delta_mse"],
+            "val/z_mse_best": best_val,
             "meta/best_epoch": float(best_epoch),
+            **rollout_val,
         }
     )
     wandb_handler.log_summary(summary)
@@ -584,9 +680,11 @@ def main() -> None:
     LOGGER.info("checkpoint=%s", checkpoint_path)
     LOGGER.info("metrics=%s", summary_path)
     LOGGER.info(
-        "final train/mse=%.6f val/mse=%.6f",
-        train_mse,
-        val_mse,
+        "final train/z_mse=%.6f train/z_delta_mse=%.6f val/z_mse=%.6f val/z_delta_mse=%.6f",
+        train_eval["z_mse"],
+        train_eval["z_delta_mse"],
+        val_eval["z_mse"],
+        val_eval["z_delta_mse"],
     )
 
 
