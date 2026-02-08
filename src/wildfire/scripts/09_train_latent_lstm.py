@@ -242,7 +242,7 @@ def maybe_tqdm(iterable: Any, *, enabled: bool, desc: str) -> Any:
     except Exception:
         LOGGER.warning("tqdm not available; continuing without progress bars")
         return iterable
-    return tqdm(iterable, desc=desc, leave=False)
+    return tqdm(iterable, desc=desc, leave=True)
 
 
 def split_fire_ids(
