@@ -15,7 +15,7 @@ val_ratio = 0.15
 seed = 7
 
 batch_size = 16
-epochs = 3
+epochs = 5
 learning_rate = 0.001
 hidden_dim = 128
 num_layers = 1
