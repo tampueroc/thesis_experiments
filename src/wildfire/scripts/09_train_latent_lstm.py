@@ -13,7 +13,7 @@ from typing import Any, cast
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from wildfire.data.dataset import WildfireSequenceDataset
+from wildfire.data.dataset import WildfireAugmentedSequenceDataset, WildfireSequenceDataset
 from wildfire.data.real_data import build_sources, choose_timestamp
 from wildfire.logging.wandb_handler import WandbHandler
 from wildfire.model_latent_predictor.model_01 import LSTMConfig, LatentLSTMPredictor
@@ -135,6 +135,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--dataset-sampling",
+        choices=["random_end_index", "enumerate_history_lengths"],
         default=cfg_value("dataset_sampling", "random_end_index"),
         help="Sampling variant name for dataset mode metadata.",
     )
@@ -596,6 +597,7 @@ def main() -> None:
     args = parse_args()
     history_for_dataset, history_min, history_max = resolve_history_settings(args)
     variant_name = dataset_variant_name(args.dataset_windowing, history_min, history_max)
+    use_augmented_index = args.dataset_sampling == "enumerate_history_lengths"
 
     timestamp = choose_timestamp(args.embeddings_root, args.timestamp)
     model_dir = args.embeddings_root / timestamp / args.input_type / args.embeddings_model_slug
@@ -623,24 +625,47 @@ def main() -> None:
     val_sources = select_sources(z_by_fire, w_by_fire, g_by_fire, val_ids)
     holdout_sources = select_sources(z_by_fire, w_by_fire, g_by_fire, holdout_ids)
 
-    train_ds = WildfireSequenceDataset(
-        *train_sources,
-        history=history_for_dataset,
-        stride=args.dataset_stride,
-        return_tensors=True,
-    )
-    val_ds = WildfireSequenceDataset(
-        *val_sources,
-        history=history_for_dataset,
-        stride=args.dataset_stride,
-        return_tensors=True,
-    )
-    holdout_ds = WildfireSequenceDataset(
-        *holdout_sources,
-        history=history_for_dataset,
-        stride=args.dataset_stride,
-        return_tensors=True,
-    )
+    if use_augmented_index:
+        train_ds = WildfireAugmentedSequenceDataset(
+            *train_sources,
+            history_min=history_min,
+            history_max=history_max,
+            stride=args.dataset_stride,
+            return_tensors=True,
+        )
+        val_ds = WildfireAugmentedSequenceDataset(
+            *val_sources,
+            history_min=history_min,
+            history_max=history_max,
+            stride=args.dataset_stride,
+            return_tensors=True,
+        )
+        holdout_ds = WildfireAugmentedSequenceDataset(
+            *holdout_sources,
+            history_min=history_min,
+            history_max=history_max,
+            stride=args.dataset_stride,
+            return_tensors=True,
+        )
+    else:
+        train_ds = WildfireSequenceDataset(
+            *train_sources,
+            history=history_for_dataset,
+            stride=args.dataset_stride,
+            return_tensors=True,
+        )
+        val_ds = WildfireSequenceDataset(
+            *val_sources,
+            history=history_for_dataset,
+            stride=args.dataset_stride,
+            return_tensors=True,
+        )
+        holdout_ds = WildfireSequenceDataset(
+            *holdout_sources,
+            history=history_for_dataset,
+            stride=args.dataset_stride,
+            return_tensors=True,
+        )
     if len(train_ds) == 0 or len(val_ds) == 0:
         raise RuntimeError(
             f"empty split after history={history_for_dataset}: train={len(train_ds)}, val={len(val_ds)}"
@@ -778,7 +803,7 @@ def main() -> None:
             optimizer,
             show_progress=not args.no_progress,
             desc=f"train e{epoch:03d}",
-            variable_windowing=args.dataset_windowing != "fixed",
+            variable_windowing=(args.dataset_windowing != "fixed" and not use_augmented_index),
             history_min=history_min,
             history_max=history_max,
         )

@@ -6,7 +6,7 @@ dataset_windowing = "variable"
 dataset_history_min = 2
 dataset_history_max = 5
 dataset_stride = 1
-dataset_sampling = "random_end_index"
+dataset_sampling = "enumerate_history_lengths"
 
 embeddings_root = "/home/tampuero/data/thesis_data/embeddings"
 landscape_dir = "/home/tampuero/data/thesis_data/landscape"
