@@ -488,7 +488,7 @@ def main() -> None:
             )
 
         LOGGER.info(
-            "[epoch %03d] train_mse=%.6f val_mse=%.6f (best_val=%.6f)",
+            "[epoch %03d] train/mse=%.6f val/mse=%.6f (val/best_mse=%.6f)",
             epoch,
             train_loss,
             val_loss,
@@ -496,10 +496,10 @@ def main() -> None:
         )
         wandb_handler.log_metrics(
             {
-                "epoch": float(epoch),
-                "train_mse": train_loss,
-                "val_mse": val_loss,
-                "best_val_mse": min(best_val, val_loss),
+                "meta/epoch": float(epoch),
+                "train/mse": train_loss,
+                "val/mse": val_loss,
+                "val/best_mse": min(best_val, val_loss),
             },
             step=epoch,
         )
@@ -511,7 +511,7 @@ def main() -> None:
                     "model_state_dict": model.state_dict(),
                     "config": asdict(config),
                     "epoch": epoch,
-                    "val_mse": val_loss,
+                    "val/mse": val_loss,
                 },
                 checkpoint_path,
             )
@@ -558,10 +558,10 @@ def main() -> None:
             "val_samples": len(val_ds),
         },
         "best_epoch": best_epoch,
-        "best_val_mse": best_val,
+        "val/best_mse": best_val,
         "metrics": {
-            "train_mse": train_mse,
-            "val_mse": val_mse,
+            "train/mse": train_mse,
+            "val/mse": val_mse,
         },
         "device": str(device),
         "config": asdict(config),
@@ -572,10 +572,10 @@ def main() -> None:
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     wandb_handler.log_metrics(
         {
-            "final_train_mse": train_mse,
-            "final_val_mse": val_mse,
-            "best_epoch": float(best_epoch),
-            "best_val_mse": best_val,
+            "train/mse": train_mse,
+            "val/mse": val_mse,
+            "val/best_mse": best_val,
+            "meta/best_epoch": float(best_epoch),
         }
     )
     wandb_handler.log_summary(summary)
@@ -584,7 +584,7 @@ def main() -> None:
     LOGGER.info("checkpoint=%s", checkpoint_path)
     LOGGER.info("metrics=%s", summary_path)
     LOGGER.info(
-        "final train_mse=%.6f val_mse=%.6f",
+        "final train/mse=%.6f val/mse=%.6f",
         train_mse,
         val_mse,
     )
