@@ -12,7 +12,6 @@ history = 5
 max_sequences = 256
 train_ratio = 0.7
 val_ratio = 0.15
-test_ratio = 0.15
 seed = 7
 
 batch_size = 16

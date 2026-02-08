@@ -250,12 +250,12 @@ def split_fire_ids(
     train_ratio: float,
     val_ratio: float,
     seed: int,
-) -> tuple[set[str], set[str]]:
+) -> tuple[set[str], set[str], set[str]]:
     if min(train_ratio, val_ratio) <= 0.0:
         raise ValueError("train/val ratios must both be > 0")
     ratio_sum = train_ratio + val_ratio
-    if not np.isclose(ratio_sum, 1.0, atol=1e-6):
-        raise ValueError(f"train+val must sum to 1.0, got {ratio_sum:.6f}")
+    if ratio_sum > 1.0 + 1e-6:
+        raise ValueError(f"train+val must be <= 1.0, got {ratio_sum:.6f}")
 
     ordered_ids = sorted(fire_ids)
     rng = random.Random(seed)
@@ -266,17 +266,24 @@ def split_fire_ids(
         raise ValueError(f"need at least 2 sequences to build train/val splits, got {n_total}")
 
     n_train = int(n_total * train_ratio)
+    n_val = int(n_total * val_ratio)
     if n_train == 0:
         n_train = 1
-    if n_train >= n_total:
-        n_train = n_total - 1
-    n_val = n_total - n_train
     if n_val == 0:
         n_val = 1
 
+    if n_train + n_val >= n_total:
+        n_val = max(1, n_total - n_train - 1)
+        if n_val <= 0:
+            n_val = 1
+            n_train = max(1, n_total - n_val - 1)
+        if n_train + n_val >= n_total:
+            raise ValueError("not enough sequences to keep holdout set separate")
+
     train_ids = set(ordered_ids[:n_train])
-    val_ids = set(ordered_ids[n_train:])
-    return train_ids, val_ids
+    val_ids = set(ordered_ids[n_train : n_train + n_val])
+    holdout_ids = set(ordered_ids[n_train + n_val :])
+    return train_ids, val_ids, holdout_ids
 
 
 def select_sources(
@@ -353,7 +360,7 @@ def main() -> None:
         max_sequences=args.max_sequences,
     )
 
-    train_ids, val_ids = split_fire_ids(
+    train_ids, val_ids, holdout_ids = split_fire_ids(
         fire_ids=list(z_by_fire.keys()),
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
@@ -437,6 +444,7 @@ def main() -> None:
             "max_sequences": args.max_sequences,
             "train_ratio": args.train_ratio,
             "val_ratio": args.val_ratio,
+            "holdout_ratio": max(0.0, 1.0 - args.train_ratio - args.val_ratio),
             "seed": args.seed,
             "batch_size": args.batch_size,
             "epochs": args.epochs,
@@ -545,6 +553,7 @@ def main() -> None:
         "splits": {
             "train_fire_ids": len(train_ids),
             "val_fire_ids": len(val_ids),
+            "holdout_fire_ids": len(holdout_ids),
             "train_samples": len(train_ds),
             "val_samples": len(val_ds),
         },
