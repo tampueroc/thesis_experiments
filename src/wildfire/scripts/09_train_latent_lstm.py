@@ -114,9 +114,6 @@ def parse_args() -> argparse.Namespace:
         "--val-ratio", type=float, default=float(cfg_value("val_ratio", 0.15)), help="Validation split ratio."
     )
     parser.add_argument(
-        "--test-ratio", type=float, default=float(cfg_value("test_ratio", 0.15)), help="Test split ratio."
-    )
-    parser.add_argument(
         "--seed", type=int, default=int(cfg_value("seed", 7)), help="Random seed for split and training."
     )
     parser.add_argument("--batch-size", type=int, default=int(cfg_value("batch_size", 32)), help="Batch size.")
@@ -246,43 +243,34 @@ def split_fire_ids(
     fire_ids: list[str],
     train_ratio: float,
     val_ratio: float,
-    test_ratio: float,
     seed: int,
-) -> tuple[set[str], set[str], set[str]]:
-    if min(train_ratio, val_ratio, test_ratio) <= 0.0:
-        raise ValueError("train/val/test ratios must all be > 0")
-    ratio_sum = train_ratio + val_ratio + test_ratio
+) -> tuple[set[str], set[str]]:
+    if min(train_ratio, val_ratio) <= 0.0:
+        raise ValueError("train/val ratios must both be > 0")
+    ratio_sum = train_ratio + val_ratio
     if not np.isclose(ratio_sum, 1.0, atol=1e-6):
-        raise ValueError(f"train+val+test must sum to 1.0, got {ratio_sum:.6f}")
+        raise ValueError(f"train+val must sum to 1.0, got {ratio_sum:.6f}")
 
     ordered_ids = sorted(fire_ids)
     rng = random.Random(seed)
     rng.shuffle(ordered_ids)
 
     n_total = len(ordered_ids)
-    if n_total < 3:
-        raise ValueError(f"need at least 3 sequences to build all splits, got {n_total}")
+    if n_total < 2:
+        raise ValueError(f"need at least 2 sequences to build train/val splits, got {n_total}")
 
     n_train = int(n_total * train_ratio)
-    n_val = int(n_total * val_ratio)
-    n_test = n_total - n_train - n_val
-
     if n_train == 0:
         n_train = 1
+    if n_train >= n_total:
+        n_train = n_total - 1
+    n_val = n_total - n_train
     if n_val == 0:
         n_val = 1
-    n_test = n_total - n_train - n_val
-    if n_test <= 0:
-        n_test = 1
-        if n_train > n_val:
-            n_train -= 1
-        else:
-            n_val -= 1
 
     train_ids = set(ordered_ids[:n_train])
-    val_ids = set(ordered_ids[n_train : n_train + n_val])
-    test_ids = set(ordered_ids[n_train + n_val :])
-    return train_ids, val_ids, test_ids
+    val_ids = set(ordered_ids[n_train:])
+    return train_ids, val_ids
 
 
 def select_sources(
@@ -359,11 +347,10 @@ def main() -> None:
         max_sequences=args.max_sequences,
     )
 
-    train_ids, val_ids, test_ids = split_fire_ids(
+    train_ids, val_ids = split_fire_ids(
         fire_ids=list(z_by_fire.keys()),
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
-        test_ratio=args.test_ratio,
         seed=args.seed,
     )
 
@@ -377,15 +364,9 @@ def main() -> None:
         history=args.history,
         return_tensors=True,
     )
-    test_ds = WildfireSequenceDataset(
-        *select_sources(z_by_fire, w_by_fire, g_by_fire, test_ids),
-        history=args.history,
-        return_tensors=True,
-    )
-
-    if len(train_ds) == 0 or len(val_ds) == 0 or len(test_ds) == 0:
+    if len(train_ds) == 0 or len(val_ds) == 0:
         raise RuntimeError(
-            f"empty split after history={args.history}: train={len(train_ds)}, val={len(val_ds)}, test={len(test_ds)}"
+            f"empty split after history={args.history}: train={len(train_ds)}, val={len(val_ds)}"
         )
 
     train_loader = DataLoader(
@@ -400,13 +381,6 @@ def main() -> None:
         shuffle=False,
         num_workers=args.num_workers,
     )
-    test_loader = DataLoader(
-        cast(Any, test_ds),
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-    )
-
     sample = train_ds[0]
     z_in = np.asarray(sample["z_in"])
     z_target = np.asarray(sample["z_target"])
@@ -457,7 +431,6 @@ def main() -> None:
             "max_sequences": args.max_sequences,
             "train_ratio": args.train_ratio,
             "val_ratio": args.val_ratio,
-            "test_ratio": args.test_ratio,
             "seed": args.seed,
             "batch_size": args.batch_size,
             "epochs": args.epochs,
@@ -552,16 +525,6 @@ def main() -> None:
             show_progress=not args.no_progress,
             desc="eval val",
         )
-        test_mse = run_epoch(
-            model,
-            test_loader,
-            loss_fn,
-            device,
-            optimizer=None,
-            show_progress=not args.no_progress,
-            desc="eval test",
-        )
-
     summary = {
         "run_id": run_id,
         "config_path": str(args.config) if args.config is not None else "",
@@ -576,17 +539,14 @@ def main() -> None:
         "splits": {
             "train_fire_ids": len(train_ids),
             "val_fire_ids": len(val_ids),
-            "test_fire_ids": len(test_ids),
             "train_samples": len(train_ds),
             "val_samples": len(val_ds),
-            "test_samples": len(test_ds),
         },
         "best_epoch": best_epoch,
         "best_val_mse": best_val,
         "metrics": {
             "train_mse": train_mse,
             "val_mse": val_mse,
-            "test_mse": test_mse,
         },
         "device": str(device),
         "config": asdict(config),
@@ -599,7 +559,6 @@ def main() -> None:
         {
             "final_train_mse": train_mse,
             "final_val_mse": val_mse,
-            "final_test_mse": test_mse,
             "best_epoch": float(best_epoch),
             "best_val_mse": best_val,
         }
@@ -610,10 +569,9 @@ def main() -> None:
     LOGGER.info("checkpoint=%s", checkpoint_path)
     LOGGER.info("metrics=%s", summary_path)
     LOGGER.info(
-        "final train_mse=%.6f val_mse=%.6f test_mse=%.6f",
+        "final train_mse=%.6f val_mse=%.6f",
         train_mse,
         val_mse,
-        test_mse,
     )
 
 
