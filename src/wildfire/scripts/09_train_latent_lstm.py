@@ -145,6 +145,19 @@ def parse_args() -> argparse.Namespace:
         default=int(cfg_value("dataset_stride", 1)),
         help="Dataset stride for sample index construction.",
     )
+    parser.set_defaults(normalize_embeddings=bool(cfg_value("normalize_embeddings", False)))
+    parser.add_argument(
+        "--normalize-embeddings",
+        dest="normalize_embeddings",
+        action="store_true",
+        help="L2-normalize each timestep embedding after loading dataset arrays.",
+    )
+    parser.add_argument(
+        "--no-normalize-embeddings",
+        dest="normalize_embeddings",
+        action="store_false",
+        help="Disable embedding normalization even if enabled in config.",
+    )
     parser.add_argument(
         "--history", type=int, default=int(cfg_value("history", 5)), help="History window length."
     )
@@ -631,6 +644,7 @@ def main() -> None:
             history_min=history_min,
             history_max=history_max,
             stride=args.dataset_stride,
+            normalize_embeddings=args.normalize_embeddings,
             return_tensors=True,
         )
         val_ds = WildfireAugmentedSequenceDataset(
@@ -638,6 +652,7 @@ def main() -> None:
             history_min=history_min,
             history_max=history_max,
             stride=args.dataset_stride,
+            normalize_embeddings=args.normalize_embeddings,
             return_tensors=True,
         )
         holdout_ds = WildfireAugmentedSequenceDataset(
@@ -645,6 +660,7 @@ def main() -> None:
             history_min=history_min,
             history_max=history_max,
             stride=args.dataset_stride,
+            normalize_embeddings=args.normalize_embeddings,
             return_tensors=True,
         )
     else:
@@ -652,18 +668,21 @@ def main() -> None:
             *train_sources,
             history=history_for_dataset,
             stride=args.dataset_stride,
+            normalize_embeddings=args.normalize_embeddings,
             return_tensors=True,
         )
         val_ds = WildfireSequenceDataset(
             *val_sources,
             history=history_for_dataset,
             stride=args.dataset_stride,
+            normalize_embeddings=args.normalize_embeddings,
             return_tensors=True,
         )
         holdout_ds = WildfireSequenceDataset(
             *holdout_sources,
             history=history_for_dataset,
             stride=args.dataset_stride,
+            normalize_embeddings=args.normalize_embeddings,
             return_tensors=True,
         )
     if len(train_ds) == 0 or len(val_ds) == 0:
@@ -716,13 +735,14 @@ def main() -> None:
     LOGGER.info("model_dir=%s", model_dir)
     LOGGER.info("output_dir=%s", run_dir)
     LOGGER.info(
-        "dataset variant=%s windowing=%s history_min=%d history_max=%d stride=%d sampling=%s",
+        "dataset variant=%s windowing=%s history_min=%d history_max=%d stride=%d sampling=%s normalize_embeddings=%s",
         variant_name,
         args.dataset_windowing,
         history_min,
         history_max,
         args.dataset_stride,
         args.dataset_sampling,
+        args.normalize_embeddings,
     )
     LOGGER.info(
         "early_stopping enabled=%s metric=%s mode=%s patience=%d min_delta=%g",
@@ -753,6 +773,7 @@ def main() -> None:
             "dataset/history_max": history_max,
             "dataset/sampling": args.dataset_sampling,
             "dataset/stride": args.dataset_stride,
+            "dataset/normalize_embeddings": args.normalize_embeddings,
             "dataset_variant": variant_name,
             "data/windowing_mode": args.dataset_windowing,
             "data/history_min": history_min,
@@ -935,6 +956,7 @@ def main() -> None:
         "dataset/history_max": history_max,
         "dataset/sampling": args.dataset_sampling,
         "dataset/stride": args.dataset_stride,
+        "dataset/normalize_embeddings": args.normalize_embeddings,
         "timestamp": timestamp,
         "model_dir": str(model_dir),
         "output_root": str(args.output_dir),

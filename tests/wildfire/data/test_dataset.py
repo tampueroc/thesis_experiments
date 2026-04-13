@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from wildfire.data.dataset import WildfireSequenceDataset
+from wildfire.data.dataset import WildfireAugmentedSequenceDataset, WildfireSequenceDataset
 
 
 def test_dataset_single_sample_tensor_shapes() -> None:
@@ -156,3 +156,70 @@ def test_dataset_raises_for_timestep_mismatch() -> None:
             static_source={"fire_a": g},
             history=5,
         )
+
+
+def test_dataset_normalizes_embeddings_after_load() -> None:
+    z = np.array(
+        [
+            [3.0, 4.0],
+            [0.0, 0.0],
+            [5.0, 12.0],
+            [8.0, 15.0],
+            [7.0, 24.0],
+            [9.0, 12.0],
+        ],
+        dtype=np.float32,
+    )
+    w = np.arange(6 * 2, dtype=np.float32).reshape(6, 2)
+    g = np.array([0.0, 1.0], dtype=np.float32)
+
+    ds = WildfireSequenceDataset(
+        embeddings_source={"fire_a": z},
+        weather_source={"fire_a": w},
+        static_source={"fire_a": g},
+        history=5,
+        normalize_embeddings=True,
+        return_tensors=False,
+    )
+
+    sample = ds[0]
+    z_in = np.asarray(sample["z_in"], dtype=np.float32)
+    z_target = np.asarray(sample["z_target"], dtype=np.float32)
+
+    assert np.allclose(z_in[0], np.array([0.6, 0.8], dtype=np.float32))
+    assert np.allclose(z_in[1], np.array([0.0, 0.0], dtype=np.float32))
+    assert np.allclose(np.linalg.norm(z_in[0]), 1.0)
+    assert np.allclose(np.linalg.norm(z_in[2]), 1.0)
+    assert np.allclose(np.linalg.norm(z_target), 1.0)
+
+
+def test_augmented_dataset_normalizes_embeddings_after_load() -> None:
+    z = np.array(
+        [
+            [3.0, 4.0],
+            [0.0, 0.0],
+            [5.0, 12.0],
+            [8.0, 15.0],
+        ],
+        dtype=np.float32,
+    )
+    w = np.arange(4 * 2, dtype=np.float32).reshape(4, 2)
+    g = np.array([0.0, 1.0], dtype=np.float32)
+
+    ds = WildfireAugmentedSequenceDataset(
+        embeddings_source={"fire_a": z},
+        weather_source={"fire_a": w},
+        static_source={"fire_a": g},
+        history_min=2,
+        history_max=3,
+        normalize_embeddings=True,
+        return_tensors=False,
+    )
+
+    sample = ds[0]
+    z_in = np.asarray(sample["z_in"], dtype=np.float32)
+    z_target = np.asarray(sample["z_target"], dtype=np.float32)
+
+    assert np.allclose(z_in[-2], np.array([0.6, 0.8], dtype=np.float32))
+    assert np.allclose(z_in[-1], np.array([0.0, 0.0], dtype=np.float32))
+    assert np.allclose(np.linalg.norm(z_target), 1.0)

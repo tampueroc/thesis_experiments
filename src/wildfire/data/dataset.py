@@ -50,6 +50,7 @@ class WildfireSequenceDataset:
         static_source: SourceLike,
         history: int = 5,
         stride: int = 1,
+        normalize_embeddings: bool = False,
         return_tensors: bool = True,
         static_categorical_indices: tuple[int, ...] = (0,),
         static_missing_value: float = -1.0,
@@ -70,6 +71,8 @@ class WildfireSequenceDataset:
         self._categorical_unknown_index = int(categorical_unknown_index)
 
         self._z_by_fire = self._load_per_fire_arrays(embeddings_source, expected_ndim=2)
+        if normalize_embeddings:
+            self._z_by_fire = self._normalize_per_fire_embeddings(self._z_by_fire)
         self._w_by_fire = self._load_per_fire_arrays(weather_source, expected_ndim=2)
         self._g_by_fire = self._load_per_fire_arrays(static_source, expected_ndim=1)
 
@@ -221,6 +224,15 @@ class WildfireSequenceDataset:
                     f"{fire_id}: expected {expected_ndim}D array, got shape {array.shape}"
                 )
 
+    @staticmethod
+    def _normalize_per_fire_embeddings(items: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        normalized: dict[str, np.ndarray] = {}
+        for fire_id, array in items.items():
+            norms = np.linalg.norm(array, axis=1, keepdims=True)
+            safe_norms = np.clip(norms, a_min=1e-8, a_max=None).astype(np.float32, copy=False)
+            normalized[fire_id] = (array / safe_norms).astype(np.float32, copy=False)
+        return normalized
+
 
 class WildfireAugmentedSequenceDataset:
     """Builds temporal samples by enumerating multiple history lengths per target.
@@ -237,6 +249,7 @@ class WildfireAugmentedSequenceDataset:
         history_min: int = 2,
         history_max: int = 5,
         stride: int = 1,
+        normalize_embeddings: bool = False,
         return_tensors: bool = True,
         static_categorical_indices: tuple[int, ...] = (0,),
         static_missing_value: float = -1.0,
@@ -260,6 +273,8 @@ class WildfireAugmentedSequenceDataset:
         self._categorical_unknown_index = int(categorical_unknown_index)
 
         self._z_by_fire = WildfireSequenceDataset._load_per_fire_arrays(embeddings_source, expected_ndim=2)
+        if normalize_embeddings:
+            self._z_by_fire = WildfireSequenceDataset._normalize_per_fire_embeddings(self._z_by_fire)
         self._w_by_fire = WildfireSequenceDataset._load_per_fire_arrays(weather_source, expected_ndim=2)
         self._g_by_fire = WildfireSequenceDataset._load_per_fire_arrays(static_source, expected_ndim=1)
 
