@@ -17,6 +17,7 @@ from wildfire.data.dataset import WildfireAugmentedSequenceDataset, WildfireSequ
 from wildfire.data.real_data import build_sources, choose_timestamp
 from wildfire.logging.wandb_handler import WandbHandler
 from wildfire.model_latent_predictor.model_01 import LSTMConfig, LatentLSTMPredictor
+from wildfire.model_latent_predictor.transformer_01 import TransformerConfig, TransformerLatentPredictor
 
 TORCH = cast(Any, torch)
 LOGGER = logging.getLogger("wildfire.train.model_01")
@@ -101,6 +102,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--family",
+        choices=["lstm", "transformer"],
         default=cfg_value("family", "lstm"),
         help="Architecture family (for example lstm, transformer, mlp).",
     )
@@ -191,6 +193,30 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=bool(cfg_value("bidirectional", False)),
         help="Use bidirectional LSTM.",
+    )
+    parser.add_argument(
+        "--d-model",
+        type=int,
+        default=int(cfg_value("d_model", 512)),
+        help="Transformer model width.",
+    )
+    parser.add_argument(
+        "--nhead",
+        type=int,
+        default=int(cfg_value("nhead", 8)),
+        help="Transformer attention head count.",
+    )
+    parser.add_argument(
+        "--dim-feedforward",
+        type=int,
+        default=int(cfg_value("dim_feedforward", 1024)),
+        help="Transformer feedforward width.",
+    )
+    parser.add_argument(
+        "--norm-first",
+        action="store_true",
+        default=bool(cfg_value("norm_first", False)),
+        help="Use pre-norm transformer encoder blocks.",
     )
     parser.add_argument(
         "--num-workers",
@@ -478,7 +504,7 @@ def select_sources(
 
 
 def run_epoch(
-    model: LatentLSTMPredictor,
+    model: Any,
     loader: Any,
     loss_fn: Any,
     device: Any,
@@ -558,7 +584,7 @@ def run_epoch(
 
 
 def rollout_metrics_at_horizon(
-    model: LatentLSTMPredictor,
+    model: Any,
     z_by_fire: dict[str, np.ndarray],
     history: int,
     horizon: int,
@@ -711,18 +737,36 @@ def main() -> None:
     sample = train_ds[0]
     z_in = np.asarray(sample["z_in"])
     z_target = np.asarray(sample["z_target"])
-    config = LSTMConfig(
-        input_dim=int(z_in.shape[-1]),
-        hidden_dim=args.hidden_dim,
-        output_dim=int(z_target.shape[-1]),
-        num_layers=args.num_layers,
-        dropout=args.dropout,
-        bidirectional=args.bidirectional,
-        batch_first=True,
-    )
+    if args.family == "lstm":
+        config = LSTMConfig(
+            input_dim=int(z_in.shape[-1]),
+            hidden_dim=args.hidden_dim,
+            output_dim=int(z_target.shape[-1]),
+            num_layers=args.num_layers,
+            dropout=args.dropout,
+            bidirectional=args.bidirectional,
+            batch_first=True,
+        )
+        model = LatentLSTMPredictor(config)
+    elif args.family == "transformer":
+        config = TransformerConfig(
+            input_dim=int(z_in.shape[-1]),
+            output_dim=int(z_target.shape[-1]),
+            d_model=args.d_model,
+            nhead=args.nhead,
+            num_layers=args.num_layers,
+            dim_feedforward=args.dim_feedforward,
+            dropout=args.dropout,
+            max_history=history_for_dataset,
+            batch_first=True,
+            norm_first=args.norm_first,
+        )
+        model = TransformerLatentPredictor(config)
+    else:
+        raise ValueError(f"unsupported family: {args.family}")
 
     device = resolve_device(args.device)
-    model = LatentLSTMPredictor(config).to(device)
+    model = model.to(device)
     optimizer = TORCH.optim.Adam(model.parameters(), lr=args.learning_rate)
     loss_fn = TORCH.nn.MSELoss()
 
@@ -793,9 +837,13 @@ def main() -> None:
             "epochs": args.epochs,
             "learning_rate": args.learning_rate,
             "hidden_dim": args.hidden_dim,
+            "d_model": args.d_model,
+            "nhead": args.nhead,
             "num_layers": args.num_layers,
+            "dim_feedforward": args.dim_feedforward,
             "dropout": args.dropout,
             "bidirectional": args.bidirectional,
+            "norm_first": args.norm_first,
             "input_type": args.input_type,
             "embeddings_model_slug": args.embeddings_model_slug,
             "component": args.component,
