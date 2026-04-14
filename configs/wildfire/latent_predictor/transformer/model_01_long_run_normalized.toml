@@ -42,7 +42,7 @@ wandb_tags = "wildfire,latent_predictor,transformer,model_01,long,normalized"
 
 [early_stopping]
 enabled = true
-metric = "rollout/val/z_mse@10"
+metric = "val/z_mse"
 mode = "min"
 patience = 12
-min_delta = 1e-4
+min_delta = 1e-5
