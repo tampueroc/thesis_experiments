@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from PIL import Image
@@ -17,6 +17,7 @@ from transformers import AutoImageProcessor, AutoModel
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
 FRAME_INDEX_PATTERN = re.compile(r"(\d+)(?!.*\d)")
 MODALITIES = ("fire_frames", "isochrones")
+TORCH = cast(Any, torch)
 
 
 @dataclass(frozen=True)
@@ -178,25 +179,25 @@ def collect_sequences(input_dir: Path) -> list[SequenceFiles]:
     return sequences
 
 
-def resolve_device(device_name: str) -> torch.device:
+def resolve_device(device_name: str) -> Any:
     if device_name == "auto":
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return torch.device("mps")
-        return torch.device("cpu")
-    return torch.device(device_name)
+        if TORCH.cuda.is_available():
+            return TORCH.device("cuda")
+        if hasattr(TORCH.backends, "mps") and TORCH.backends.mps.is_available():
+            return TORCH.device("mps")
+        return TORCH.device("cpu")
+    return TORCH.device(device_name)
 
 
-def resolve_dtype(dtype_name: str, device: torch.device) -> torch.dtype:
+def resolve_dtype(dtype_name: str, device: Any) -> Any:
     mapping = {
-        "float32": torch.float32,
-        "float16": torch.float16,
-        "bfloat16": torch.bfloat16,
+        "float32": TORCH.float32,
+        "float16": TORCH.float16,
+        "bfloat16": TORCH.bfloat16,
     }
     dtype = mapping[dtype_name]
-    if device.type == "cpu" and dtype != torch.float32:
-        return torch.float32
+    if device.type == "cpu" and dtype != TORCH.float32:
+        return TORCH.float32
     return dtype
 
 
@@ -226,16 +227,16 @@ def encode_batch(
     batch_images: list[Image.Image],
     processor: Any,
     model: Any,
-    device: torch.device,
-    dtype: torch.dtype,
+    device: Any,
+    dtype: Any,
 ) -> np.ndarray:
     inputs = processor(images=batch_images, return_tensors="pt")
     inputs = {k: v.to(device) for k, v in inputs.items()}
-    with torch.inference_mode():
+    with TORCH.inference_mode():
         if device.type == "cpu":
             outputs = model(**inputs)
         else:
-            with torch.autocast(device_type=device.type, dtype=dtype):
+            with TORCH.autocast(device_type=device.type, dtype=dtype):
                 outputs = model(**inputs)
     embeddings = outputs.last_hidden_state[:, 0, :].detach().cpu().numpy()
     return embeddings
@@ -246,8 +247,8 @@ def process_fire(
     model_output_dir: Path,
     processor: Any | None,
     model: Any | None,
-    device: torch.device,
-    dtype: torch.dtype,
+    device: Any,
+    dtype: Any,
     expected_timesteps: int,
     strict: bool,
     all_frames: bool,
