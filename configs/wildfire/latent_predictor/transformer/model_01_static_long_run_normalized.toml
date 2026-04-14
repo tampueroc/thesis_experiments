@@ -7,6 +7,7 @@ dataset_history = 5
 dataset_stride = 1
 dataset_sampling = "random_end_index"
 normalize_embeddings = true
+normalize_static_num = true
 
 embeddings_root = "/home/tampuero/data/thesis_data/embeddings"
 landscape_dir = "/home/tampuero/data/thesis_data/landscape"

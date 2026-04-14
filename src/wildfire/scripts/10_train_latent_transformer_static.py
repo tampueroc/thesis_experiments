@@ -164,6 +164,19 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable embedding normalization even if enabled in config.",
     )
+    parser.set_defaults(normalize_static_num=bool(cfg_value("normalize_static_num", True)))
+    parser.add_argument(
+        "--normalize-static-num",
+        dest="normalize_static_num",
+        action="store_true",
+        help="Normalize numeric static landscape variables using train-split statistics.",
+    )
+    parser.add_argument(
+        "--no-normalize-static-num",
+        dest="normalize_static_num",
+        action="store_false",
+        help="Disable numeric static landscape normalization.",
+    )
     parser.add_argument("--history", type=int, default=int(cfg_value("history", 5)), help="History window length.")
     parser.add_argument(
         "--max-sequences",
@@ -433,6 +446,56 @@ def static_cat_vocab_size(g_by_fire: dict[str, np.ndarray]) -> int:
     return max_code + 1
 
 
+def static_num_indices(g_dim: int) -> np.ndarray:
+    return np.asarray(
+        [i for i in range(g_dim) if i not in STATIC_CATEGORICAL_INDICES],
+        dtype=np.int64,
+    )
+
+
+def compute_static_num_stats(g_by_fire: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    sample = next(iter(g_by_fire.values()))
+    g_dim = int(np.asarray(sample, dtype=np.float32).shape[0])
+    num_indices = static_num_indices(g_dim)
+    means = np.zeros((num_indices.shape[0],), dtype=np.float32)
+    stds = np.ones((num_indices.shape[0],), dtype=np.float32)
+    if num_indices.size == 0:
+        return means, stds
+
+    stacked = np.stack([np.asarray(g, dtype=np.float32)[num_indices] for g in g_by_fire.values()], axis=0)
+    valid = stacked != STATIC_MISSING_VALUE
+    for i in range(num_indices.shape[0]):
+        values = stacked[:, i][valid[:, i]]
+        if values.size == 0:
+            continue
+        means[i] = np.float32(values.mean())
+        std = float(values.std())
+        stds[i] = np.float32(std if std > 1e-6 else 1.0)
+    return means, stds
+
+
+def normalize_static_num_sources(
+    g_by_fire: dict[str, np.ndarray],
+    means: np.ndarray,
+    stds: np.ndarray,
+) -> dict[str, np.ndarray]:
+    if not g_by_fire:
+        return {}
+    sample = next(iter(g_by_fire.values()))
+    g_dim = int(np.asarray(sample, dtype=np.float32).shape[0])
+    num_indices = static_num_indices(g_dim)
+    normalized: dict[str, np.ndarray] = {}
+    for fire_id, g in g_by_fire.items():
+        g_arr = np.asarray(g, dtype=np.float32).copy()
+        if num_indices.size:
+            raw_num = g_arr[num_indices]
+            valid = raw_num != STATIC_MISSING_VALUE
+            raw_num[valid] = ((raw_num[valid] - means[valid]) / stds[valid]).astype(np.float32, copy=False)
+            g_arr[num_indices] = raw_num
+        normalized[fire_id] = g_arr
+    return normalized
+
+
 def encode_static_features(g: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     cat_indices = np.asarray(STATIC_CATEGORICAL_INDICES, dtype=np.int64)
     num_indices = np.asarray(
@@ -634,6 +697,16 @@ def main() -> None:
     train_sources = select_sources(z_by_fire, w_by_fire, g_by_fire, train_ids)
     val_sources = select_sources(z_by_fire, w_by_fire, g_by_fire, val_ids)
     holdout_sources = select_sources(z_by_fire, w_by_fire, g_by_fire, holdout_ids)
+    static_num_mean = np.zeros((0,), dtype=np.float32)
+    static_num_std = np.ones((0,), dtype=np.float32)
+    if args.normalize_static_num:
+        static_num_mean, static_num_std = compute_static_num_stats(train_sources[2])
+        train_g_norm = normalize_static_num_sources(train_sources[2], static_num_mean, static_num_std)
+        val_g_norm = normalize_static_num_sources(val_sources[2], static_num_mean, static_num_std)
+        holdout_g_norm = normalize_static_num_sources(holdout_sources[2], static_num_mean, static_num_std)
+        train_sources = (train_sources[0], train_sources[1], train_g_norm)
+        val_sources = (val_sources[0], val_sources[1], val_g_norm)
+        holdout_sources = (holdout_sources[0], holdout_sources[1], holdout_g_norm)
     rollout_val_z_by_fire = val_sources[0]
     if args.normalize_embeddings:
         rollout_val_z_by_fire = WildfireSequenceDataset._normalize_per_fire_embeddings(rollout_val_z_by_fire)
@@ -765,6 +838,11 @@ def main() -> None:
         args.normalize_embeddings,
     )
     LOGGER.info(
+        "static_num_normalization enabled=%s dims=%d",
+        args.normalize_static_num,
+        int(static_num_mean.shape[0]),
+    )
+    LOGGER.info(
         "early_stopping enabled=%s metric=%s mode=%s patience=%d min_delta=%g",
         args.early_stop_enabled,
         args.early_stop_metric,
@@ -794,6 +872,7 @@ def main() -> None:
             "dataset/sampling": args.dataset_sampling,
             "dataset/stride": args.dataset_stride,
             "dataset/normalize_embeddings": args.normalize_embeddings,
+            "dataset/normalize_static_num": args.normalize_static_num,
             "dataset_variant": variant_name,
             "max_sequences": args.max_sequences,
             "train_ratio": args.train_ratio,
@@ -812,6 +891,8 @@ def main() -> None:
             "static_hidden_dim": args.static_hidden_dim,
             "static_cat_vocab_size": cat_vocab_size,
             "static_cat_embed_dim": args.static_cat_embed_dim,
+            "static_num_mean": static_num_mean.tolist(),
+            "static_num_std": static_num_std.tolist(),
             "input_type": args.input_type,
             "embeddings_model_slug": args.embeddings_model_slug,
             "component": args.component,
@@ -985,6 +1066,7 @@ def main() -> None:
         "dataset/sampling": args.dataset_sampling,
         "dataset/stride": args.dataset_stride,
         "dataset/normalize_embeddings": args.normalize_embeddings,
+        "dataset/normalize_static_num": args.normalize_static_num,
         "timestamp": timestamp,
         "model_dir": str(model_dir),
         "output_root": str(args.output_dir),
@@ -1011,6 +1093,8 @@ def main() -> None:
         },
         "device": str(device),
         "config": asdict(config),
+        "static_num_mean": static_num_mean.tolist(),
+        "static_num_std": static_num_std.tolist(),
         "checkpoint": str(checkpoint_path),
     }
 
