@@ -56,11 +56,21 @@ class WandbHandler:
             return
         self._run.log(metrics, step=step)
 
+    def log_payload(self, payload: dict[str, Any], step: int | None = None) -> None:
+        if not self.enabled or self._run is None:
+            return
+        self._run.log(payload, step=step)
+
     def log_summary(self, payload: dict[str, Any]) -> None:
         if not self.enabled or self._run is None:
             return
         for key, value in payload.items():
             self._run.summary[key] = value
+
+    def image(self, image_path: Path, caption: str = "") -> Any | None:
+        if not self.enabled or self._wandb is None:
+            return None
+        return self._wandb.Image(str(image_path), caption=caption)
 
     def finish(self) -> None:
         if not self.enabled or self._run is None:
