@@ -200,7 +200,7 @@ def split_fire_ids(
     train_ratio: float,
     val_ratio: float,
     seed: int,
-) -> tuple[set[str], set[str]]:
+) -> tuple[set[str], set[str], set[str]]:
     if min(train_ratio, val_ratio) <= 0.0:
         raise ValueError("train/val ratios must both be > 0")
     ratio_sum = train_ratio + val_ratio
@@ -217,13 +217,17 @@ def split_fire_ids(
 
     n_train = max(1, int(n_total * train_ratio))
     n_val = max(1, int(n_total * val_ratio))
-    if n_train + n_val > n_total:
-        n_val = max(1, n_total - n_train)
-    if n_train + n_val > n_total:
-        raise ValueError("not enough sequences to build train/val splits")
+    if n_train + n_val >= n_total:
+        n_val = max(1, n_total - n_train - 1)
+        if n_val <= 0:
+            n_val = 1
+            n_train = max(1, n_total - n_val - 1)
+    if n_train + n_val >= n_total:
+        raise ValueError("not enough sequences to keep holdout set separate")
     return (
         set(ordered_ids[:n_train]),
         set(ordered_ids[n_train : n_train + n_val]),
+        set(ordered_ids[n_train + n_val :]),
     )
 
 
@@ -462,7 +466,7 @@ def main() -> None:
         z_by_fire = {fire_id: z_by_fire[fire_id] for fire_id in limited_ids}
         frames_by_fire = {fire_id: frames_by_fire[fire_id] for fire_id in limited_ids}
 
-    train_ids, val_ids = split_fire_ids(
+    train_ids, val_ids, holdout_ids = split_fire_ids(
         fire_ids=list(z_by_fire.keys()),
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
@@ -687,6 +691,7 @@ def main() -> None:
         "splits": {
             "train_fire_ids": len(train_ids),
             "val_fire_ids": len(val_ids),
+            "holdout_fire_ids_reserved": len(holdout_ids),
             "train_samples": len(train_ds),
             "val_samples": len(val_ds),
         },
