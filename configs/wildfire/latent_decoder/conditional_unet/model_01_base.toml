@@ -21,6 +21,8 @@ num_pool_layers = 4
 conditioning_channels_per_embedding = 32
 bottleneck_spatial_size = 25
 dice_loss_weight = 1.0
+recon_log_interval = 10
+recon_log_samples = 4
 num_workers = 0
 device = "auto"
 

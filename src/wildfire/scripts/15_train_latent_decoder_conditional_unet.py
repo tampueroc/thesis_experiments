@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
+from PIL import Image
 import torch
 from torch.utils.data import DataLoader
 
@@ -100,6 +101,18 @@ def parse_args() -> argparse.Namespace:
         "--dice-loss-weight",
         type=float,
         default=float(cfg_value("dice_loss_weight", 1.0)),
+    )
+    parser.add_argument(
+        "--recon-log-interval",
+        type=int,
+        default=int(cfg_value("recon_log_interval", 10)),
+        help="Save qualitative reconstruction panels every N epochs. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--recon-log-samples",
+        type=int,
+        default=int(cfg_value("recon_log_samples", 4)),
+        help="Number of validation samples to include in each reconstruction panel.",
     )
     parser.add_argument("--num-workers", type=int, default=int(cfg_value("num_workers", 0)))
     parser.add_argument(
@@ -340,6 +353,101 @@ def run_epoch(
     }
 
 
+def tensor_chw_to_uint8_hwc(image: np.ndarray) -> np.ndarray:
+    clipped = np.clip(image, 0.0, 1.0)
+    hwc = np.transpose(clipped, (1, 2, 0))
+    return np.rint(hwc * 255.0).astype(np.uint8, copy=False)
+
+
+def make_reconstruction_panel(
+    *,
+    prev_images: list[np.ndarray],
+    pred_images: list[np.ndarray],
+    target_images: list[np.ndarray],
+) -> np.ndarray:
+    if not prev_images or not (len(prev_images) == len(pred_images) == len(target_images)):
+        raise ValueError("reconstruction panel inputs must be non-empty and aligned")
+
+    sample_h = int(prev_images[0].shape[1])
+    sample_w = int(prev_images[0].shape[2])
+    spacer = 4
+    columns = 3
+    rows = len(prev_images)
+    panel_h = (rows * sample_h) + ((rows + 1) * spacer)
+    panel_w = (columns * sample_w) + ((columns + 1) * spacer)
+    panel = np.full((panel_h, panel_w, 3), 24, dtype=np.uint8)
+
+    for row_idx, (prev_image, pred_image, target_image) in enumerate(
+        zip(prev_images, pred_images, target_images, strict=True)
+    ):
+        top = spacer + (row_idx * (sample_h + spacer))
+        left = spacer
+        triplet = [prev_image, pred_image, target_image]
+        for col_idx, image in enumerate(triplet):
+            col_left = left + (col_idx * (sample_w + spacer))
+            panel[top : top + sample_h, col_left : col_left + sample_w, :] = tensor_chw_to_uint8_hwc(image)
+    return panel
+
+
+def log_reconstruction_panel(
+    *,
+    model: Any,
+    dataset: WildfireDecoderDataset,
+    device: Any,
+    run_dir: Path,
+    split_name: str,
+    tag: str,
+    num_samples: int,
+    wandb_handler: WandbHandler,
+    step: int | None,
+) -> Path | None:
+    if num_samples <= 0 or len(dataset) == 0:
+        return None
+
+    sample_count = min(num_samples, len(dataset))
+    prev_images: list[np.ndarray] = []
+    pred_images: list[np.ndarray] = []
+    target_images: list[np.ndarray] = []
+    model.eval()
+    with TORCH.no_grad():
+        for sample_idx in range(sample_count):
+            sample = dataset[sample_idx]
+            prev_image_tensor = cast(Any, sample["prev_image"])
+            prev_embedding_tensor = cast(Any, sample["prev_embedding"])
+            target_embedding_tensor = cast(Any, sample["target_embedding"])
+            target_image_tensor = cast(Any, sample["target_image"])
+            prev_image = prev_image_tensor.unsqueeze(0).to(device)
+            prev_embedding = prev_embedding_tensor.unsqueeze(0).to(device)
+            target_embedding = target_embedding_tensor.unsqueeze(0).to(device)
+            target_image = target_image_tensor.cpu().numpy()
+
+            pred_logits = model(prev_image, prev_embedding, target_embedding)
+            pred_image = TORCH.sigmoid(pred_logits).squeeze(0).detach().cpu().numpy()
+
+            prev_images.append(prev_image_tensor.cpu().numpy())
+            pred_images.append(pred_image)
+            target_images.append(target_image)
+
+    panel = make_reconstruction_panel(
+        prev_images=prev_images,
+        pred_images=pred_images,
+        target_images=target_images,
+    )
+    recon_dir = run_dir / "reconstructions"
+    recon_dir.mkdir(parents=True, exist_ok=True)
+    output_path = recon_dir / f"{split_name}_{tag}.png"
+    Image.fromarray(panel, mode="RGB").save(output_path)
+    LOGGER.info("saved reconstruction panel: %s", output_path)
+
+    wandb_image = wandb_handler.image(
+        output_path,
+        caption=f"{split_name} {tag} | columns=prev,pred,target",
+    )
+    if wandb_image is not None:
+        wandb_handler.log_payload({f"{split_name}/recon_panel": wandb_image}, step=step)
+    return output_path
+
+
 def main() -> None:
     args = parse_args()
     timestamp = choose_timestamp(args.embeddings_root, args.timestamp)
@@ -424,6 +532,11 @@ def main() -> None:
     LOGGER.info("model_dir=%s", model_dir)
     LOGGER.info("output_dir=%s", run_dir)
     LOGGER.info("normalize_embeddings=%s", args.normalize_embeddings)
+    LOGGER.info(
+        "reconstruction logging interval=%d samples=%d",
+        args.recon_log_interval,
+        args.recon_log_samples,
+    )
 
     wandb_run_name = args.wandb_run_name if args.wandb_run_name else run_id
     wandb_tags = [x.strip() for x in args.wandb_tags.split(",") if x.strip()]
@@ -446,6 +559,8 @@ def main() -> None:
             "conditioning_channels_per_embedding": args.conditioning_channels_per_embedding,
             "bottleneck_spatial_size": args.bottleneck_spatial_size,
             "dice_loss_weight": args.dice_loss_weight,
+            "recon_log_interval": args.recon_log_interval,
+            "recon_log_samples": args.recon_log_samples,
             "normalize_embeddings": args.normalize_embeddings,
             "input_type": args.input_type,
             "embeddings_model_slug": args.embeddings_model_slug,
@@ -519,6 +634,18 @@ def main() -> None:
                 checkpoint_path,
             )
         wandb_handler.log_metrics({"meta/epoch": float(epoch), **epoch_metrics}, step=epoch)
+        if args.recon_log_interval > 0 and (epoch == 1 or epoch % args.recon_log_interval == 0):
+            log_reconstruction_panel(
+                model=model,
+                dataset=val_ds,
+                device=device,
+                run_dir=run_dir,
+                split_name="val",
+                tag=f"epoch_{epoch:03d}",
+                num_samples=args.recon_log_samples,
+                wandb_handler=wandb_handler,
+                step=epoch,
+            )
         if args.early_stop_enabled and should_stop:
             LOGGER.info("early stopping at epoch=%d", epoch)
             break
@@ -557,6 +684,28 @@ def main() -> None:
             show_progress=not args.no_progress,
             desc="eval holdout",
         )
+    final_val_panel = log_reconstruction_panel(
+        model=model,
+        dataset=val_ds,
+        device=device,
+        run_dir=run_dir,
+        split_name="val",
+        tag="final",
+        num_samples=args.recon_log_samples,
+        wandb_handler=wandb_handler,
+        step=best_epoch if best_epoch > 0 else None,
+    )
+    final_holdout_panel = log_reconstruction_panel(
+        model=model,
+        dataset=holdout_ds,
+        device=device,
+        run_dir=run_dir,
+        split_name="holdout",
+        tag="final",
+        num_samples=args.recon_log_samples,
+        wandb_handler=wandb_handler,
+        step=best_epoch if best_epoch > 0 else None,
+    )
 
     summary = {
         "run_id": run_id,
@@ -591,6 +740,10 @@ def main() -> None:
         },
         "config": asdict(config),
         "checkpoint": str(checkpoint_path),
+        "qualitative": {
+            "val_recon_panel": str(final_val_panel) if final_val_panel is not None else "",
+            "holdout_recon_panel": str(final_holdout_panel) if final_holdout_panel is not None else "",
+        },
     }
     summary_path = run_dir / "metrics.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
