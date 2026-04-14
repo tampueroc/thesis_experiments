@@ -563,6 +563,7 @@ def rollout_metrics_at_horizon(
     history: int,
     horizon: int,
     device: Any,
+    normalize_embeddings: bool = False,
 ) -> dict[str, float]:
     model.eval()
     total_mse = 0.0
@@ -582,6 +583,8 @@ def rollout_metrics_at_horizon(
                 pred = None
                 for _step in range(horizon):
                     pred = model(window_t)
+                    if normalize_embeddings:
+                        pred = pred / TORCH.norm(pred, dim=1, keepdim=True).clamp_min(1e-8)
                     window_t = TORCH.cat([window_t[:, 1:, :], pred.unsqueeze(1)], dim=1)
                 if pred is None:
                     continue
@@ -637,6 +640,9 @@ def main() -> None:
     train_sources = select_sources(z_by_fire, w_by_fire, g_by_fire, train_ids)
     val_sources = select_sources(z_by_fire, w_by_fire, g_by_fire, val_ids)
     holdout_sources = select_sources(z_by_fire, w_by_fire, g_by_fire, holdout_ids)
+    rollout_val_z_by_fire = val_sources[0]
+    if args.normalize_embeddings:
+        rollout_val_z_by_fire = WildfireSequenceDataset._normalize_per_fire_embeddings(rollout_val_z_by_fire)
 
     if use_augmented_index:
         train_ds = WildfireAugmentedSequenceDataset(
@@ -854,10 +860,11 @@ def main() -> None:
             epoch_metrics.update(
                 rollout_metrics_at_horizon(
                     model,
-                    z_by_fire=val_sources[0],
+                    z_by_fire=rollout_val_z_by_fire,
                     history=history_for_dataset,
                     horizon=monitor_rollout_horizon,
                     device=device,
+                    normalize_embeddings=args.normalize_embeddings,
                 )
             )
         if monitor_metric not in epoch_metrics:
@@ -938,10 +945,11 @@ def main() -> None:
         )
     rollout_val = rollout_metrics_at_horizon(
         model,
-        z_by_fire=val_sources[0],
+        z_by_fire=rollout_val_z_by_fire,
         history=history_for_dataset,
         horizon=10,
         device=device,
+        normalize_embeddings=args.normalize_embeddings,
     )
     summary = {
         "run_id": run_id,
