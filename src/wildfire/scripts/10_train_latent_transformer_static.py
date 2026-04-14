@@ -741,6 +741,14 @@ def main() -> None:
         args.dataset_sampling,
         args.normalize_embeddings,
     )
+    LOGGER.info(
+        "early_stopping enabled=%s metric=%s mode=%s patience=%d min_delta=%g",
+        args.early_stop_enabled,
+        args.early_stop_metric,
+        args.early_stop_mode,
+        args.early_stop_patience,
+        args.early_stop_min_delta,
+    )
 
     wandb_run_name = args.wandb_run_name if args.wandb_run_name else run_id
     wandb_tags = [x.strip() for x in args.wandb_tags.split(",") if x.strip()]
@@ -855,6 +863,17 @@ def main() -> None:
             raise KeyError(f"early-stop metric '{monitor_metric}' is not available in epoch metrics")
         monitor_value = float(epoch_metrics[monitor_metric])
 
+        LOGGER.info(
+            "[epoch %03d] train/z_mse=%.6f train/z_delta_mse=%.6f train/grad_norm=%.6f val/z_mse=%.6f val/z_delta_mse=%.6f val/z_cosine=%.6f (monitor/best=%.6f)",
+            epoch,
+            train_metrics["z_mse"],
+            train_metrics["z_delta_mse"],
+            train_metrics.get("grad_norm", float("nan")),
+            val_metrics["z_mse"],
+            val_metrics["z_delta_mse"],
+            val_metrics["z_cosine"],
+            best_metric_value if best_metric_value is not None else float("nan"),
+        )
         improved, should_stop = early_stopper.update(monitor_value)
         if best_metric_value is None or improved:
             best_metric_value = monitor_value
@@ -986,6 +1005,16 @@ def main() -> None:
     )
     wandb_handler.log_summary(summary)
     wandb_handler.finish()
+    LOGGER.info("checkpoint=%s", checkpoint_path)
+    LOGGER.info("metrics=%s", summary_path)
+    LOGGER.info(
+        "final train/z_mse=%.6f train/z_delta_mse=%.6f val/z_mse=%.6f val/z_delta_mse=%.6f val/z_cosine=%.6f",
+        train_eval["z_mse"],
+        train_eval["z_delta_mse"],
+        val_eval["z_mse"],
+        val_eval["z_delta_mse"],
+        val_eval["z_cosine"],
+    )
 
 
 if __name__ == "__main__":
