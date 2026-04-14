@@ -28,6 +28,7 @@ num_layers = 4
 dim_feedforward = 1024
 dropout = 0.1
 static_hidden_dim = 256
+static_cat_embed_dim = 32
 norm_first = false
 num_workers = 4
 device = "auto"

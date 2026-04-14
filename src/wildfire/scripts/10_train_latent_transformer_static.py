@@ -193,6 +193,12 @@ def parse_args() -> argparse.Namespace:
         help="Hidden size for static landscape encoder.",
     )
     parser.add_argument(
+        "--static-cat-embed-dim",
+        type=int,
+        default=int(cfg_value("static_cat_embed_dim", 32)),
+        help="Embedding size for each static categorical feature.",
+    )
+    parser.add_argument(
         "--norm-first",
         action="store_true",
         default=bool(cfg_value("norm_first", False)),
@@ -411,6 +417,20 @@ def select_sources(
         {k: w_by_fire[k] for k in keys},
         {k: g_by_fire[k] for k in keys},
     )
+
+
+def static_cat_vocab_size(g_by_fire: dict[str, np.ndarray]) -> int:
+    max_code = CATEGORICAL_UNKNOWN_INDEX
+    for g in g_by_fire.values():
+        g_arr = np.asarray(g, dtype=np.float32)
+        for idx in STATIC_CATEGORICAL_INDICES:
+            if idx >= g_arr.shape[0]:
+                continue
+            raw_value = g_arr[idx]
+            if raw_value == STATIC_MISSING_VALUE:
+                continue
+            max_code = max(max_code, int(np.rint(raw_value)))
+    return max_code + 1
 
 
 def encode_static_features(g: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -696,11 +716,13 @@ def main() -> None:
     z_target = np.asarray(sample["z_target"])
     g_num = np.asarray(sample["g_num"])
     g_cat = np.asarray(sample["g_cat"])
+    cat_vocab_size = static_cat_vocab_size(g_by_fire)
     config = StaticTransformerConfig(
         input_dim=int(z_in.shape[-1]),
         output_dim=int(z_target.shape[-1]),
         static_num_dim=int(g_num.shape[-1]),
         static_cat_dim=int(g_cat.shape[-1]),
+        static_cat_vocab_size=cat_vocab_size,
         d_model=args.d_model,
         nhead=args.nhead,
         num_layers=args.num_layers,
@@ -710,6 +732,7 @@ def main() -> None:
         batch_first=True,
         norm_first=args.norm_first,
         static_hidden_dim=args.static_hidden_dim,
+        static_cat_embed_dim=args.static_cat_embed_dim,
     )
 
     device = resolve_device(args.device)
@@ -787,6 +810,8 @@ def main() -> None:
             "dropout": args.dropout,
             "norm_first": args.norm_first,
             "static_hidden_dim": args.static_hidden_dim,
+            "static_cat_vocab_size": cat_vocab_size,
+            "static_cat_embed_dim": args.static_cat_embed_dim,
             "input_type": args.input_type,
             "embeddings_model_slug": args.embeddings_model_slug,
             "component": args.component,
