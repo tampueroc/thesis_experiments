@@ -98,3 +98,27 @@ def test_decoder_dataset_supports_single_channel_masks(tmp_path: Path) -> None:
     target_image = np.asarray(sample["target_image"], dtype=np.float32)
     assert tuple(prev_image.shape) == (1, 400, 400)
     assert tuple(target_image.shape) == (1, 400, 400)
+
+
+def test_decoder_dataset_binarizes_masks(tmp_path: Path) -> None:
+    seq_dir = tmp_path / "sequence_001"
+    seq_dir.mkdir()
+    low = np.full((400, 400), 30, dtype=np.uint8)
+    high = np.full((400, 400), 215, dtype=np.uint8)
+    Image.fromarray(low, mode="L").save(seq_dir / "fire_000.png")
+    Image.fromarray(high, mode="L").save(seq_dir / "fire_001.png")
+    z = np.arange(2 * 2, dtype=np.float32).reshape(2, 2)
+    ds = WildfireDecoderDataset(
+        embeddings_source={"sequence_001": z},
+        frames_source={"sequence_001": [seq_dir / "fire_000.png", seq_dir / "fire_001.png"]},
+        image_channels=1,
+        binarize_masks=True,
+        mask_threshold=0.5,
+        return_tensors=False,
+    )
+
+    sample = ds[0]
+    prev_image = np.asarray(sample["prev_image"], dtype=np.float32)
+    target_image = np.asarray(sample["target_image"], dtype=np.float32)
+    assert np.array_equal(np.unique(prev_image), np.array([0.0], dtype=np.float32))
+    assert np.array_equal(np.unique(target_image), np.array([1.0], dtype=np.float32))

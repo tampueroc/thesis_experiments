@@ -21,11 +21,21 @@ def _torch_from_numpy(array: np.ndarray) -> Any:
     return cast(Any, torch).from_numpy(array)
 
 
-def load_mask_tensor(image_path: Path, *, image_channels: int) -> np.ndarray:
+def load_mask_tensor(
+    image_path: Path,
+    *,
+    image_channels: int,
+    binarize_mask: bool = False,
+    mask_threshold: float = 0.5,
+) -> np.ndarray:
     if image_channels <= 0:
         raise ValueError("image_channels must be > 0")
+    if mask_threshold < 0.0 or mask_threshold > 1.0:
+        raise ValueError("mask_threshold must be in [0.0, 1.0]")
     with Image.open(image_path) as image:
         gray = np.asarray(image.convert("L"), dtype=np.float32) / 255.0
+    if binarize_mask:
+        gray = (gray >= mask_threshold).astype(np.float32, copy=False)
     if image_channels == 1:
         return gray[None, :, :].astype(np.float32, copy=False)
     chw = np.repeat(gray[None, :, :], image_channels, axis=0)
@@ -111,11 +121,15 @@ class WildfireDecoderDataset:
         embeddings_source: ArrayMap,
         frames_source: FramePathMap,
         image_channels: int = 3,
+        binarize_masks: bool = False,
+        mask_threshold: float = 0.5,
         normalize_embeddings: bool = False,
         return_tensors: bool = True,
     ) -> None:
         self._return_tensors = return_tensors
         self._image_channels = int(image_channels)
+        self._binarize_masks = bool(binarize_masks)
+        self._mask_threshold = float(mask_threshold)
         self._z_by_fire = {
             str(fire_id): np.asarray(values, dtype=np.float32)
             for fire_id, values in embeddings_source.items()
@@ -138,8 +152,18 @@ class WildfireDecoderDataset:
         item = self._sample_index[idx]
         z = self._z_by_fire[item.fire_id]
         frames = self._frames_by_fire[item.fire_id]
-        prev_image = load_mask_tensor(frames[item.prev_idx], image_channels=self._image_channels)
-        target_image = load_mask_tensor(frames[item.target_idx], image_channels=self._image_channels)
+        prev_image = load_mask_tensor(
+            frames[item.prev_idx],
+            image_channels=self._image_channels,
+            binarize_mask=self._binarize_masks,
+            mask_threshold=self._mask_threshold,
+        )
+        target_image = load_mask_tensor(
+            frames[item.target_idx],
+            image_channels=self._image_channels,
+            binarize_mask=self._binarize_masks,
+            mask_threshold=self._mask_threshold,
+        )
         prev_embedding = z[item.prev_idx]
         target_embedding = z[item.target_idx]
 
