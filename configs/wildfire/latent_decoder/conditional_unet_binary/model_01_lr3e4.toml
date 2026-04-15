@@ -1,0 +1,44 @@
+component = "latent_decoder"
+family = "conditional_unet_binary"
+variant = "model_01_lr3e4"
+
+embeddings_root = "/home/tampuero/data/thesis_data/embeddings"
+timestamp = ""
+input_type = "fire_frames"
+embeddings_model_slug = "facebook__dinov2-small"
+
+normalize_embeddings = true
+max_sequences = 0
+train_ratio = 0.7
+val_ratio = 0.15
+seed = 7
+
+batch_size = 8
+epochs = 50
+learning_rate = 0.0003
+base_channels = 32
+num_pool_layers = 4
+conditioning_channels_per_embedding = 32
+bottleneck_spatial_size = 25
+dice_loss_weight = 1.0
+hard_threshold = 0.5
+recon_log_interval = 10
+recon_log_samples = 4
+num_workers = 0
+device = "auto"
+
+output_dir = "artifacts/wildfire"
+
+wandb = true
+wandb_project = "latent_wildfire"
+wandb_entity = ""
+wandb_run_name = ""
+wandb_mode = "online"
+wandb_tags = "wildfire,latent_decoder,conditional_unet_binary,model_01,lr3e4"
+
+[early_stopping]
+enabled = true
+metric = "val/loss"
+mode = "min"
+patience = 12
+min_delta = 1e-5
