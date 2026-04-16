@@ -362,21 +362,34 @@ def main() -> None:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     exported_sequences: list[dict[str, Any]] = []
+    skipped_sequences: list[dict[str, Any]] = []
     with TORCH.no_grad():
         for fire_id in sorted(selected_ids):
             z = z_by_fire[fire_id]
             g = g_by_fire[fire_id]
-            exported = export_sequence_predictions(
-                model=model,
-                z=z,
-                g=g,
-                history=history,
-                uses_static=uses_static,
-                is_residual=is_residual,
-                normalize_embeddings=normalize_embeddings,
-                prediction_mode=args.prediction_mode,
-                device=device,
-            )
+            try:
+                exported = export_sequence_predictions(
+                    model=model,
+                    z=z,
+                    g=g,
+                    history=history,
+                    uses_static=uses_static,
+                    is_residual=is_residual,
+                    normalize_embeddings=normalize_embeddings,
+                    prediction_mode=args.prediction_mode,
+                    device=device,
+                )
+            except ValueError as exc:
+                if "sequence too short" not in str(exc):
+                    raise
+                skipped_sequences.append(
+                    {
+                        "sequence_id": fire_id,
+                        "num_frames": int(z.shape[0]),
+                        "reason": str(exc),
+                    }
+                )
+                continue
             seq_path = (output_dir / f"{fire_id}.npy").resolve()
             np.save(seq_path, exported.astype(np.float32, copy=False))
             exported_sequences.append(
@@ -403,6 +416,7 @@ def main() -> None:
         "history": history,
         "normalize_embeddings": normalize_embeddings,
         "sequences": exported_sequences,
+        "skipped_sequences": skipped_sequences,
     }
     (output_dir / "manifest.json").write_text(json.dumps(export_manifest, indent=2), encoding="utf-8")
 
@@ -414,7 +428,12 @@ def main() -> None:
     }
     (output_dir / "splits.json").write_text(json.dumps(split_summary, indent=2), encoding="utf-8")
 
-    LOGGER.info("exported %d sequences to %s", len(exported_sequences), output_dir)
+    LOGGER.info(
+        "exported %d sequences to %s (skipped=%d)",
+        len(exported_sequences),
+        output_dir,
+        len(skipped_sequences),
+    )
 
 
 if __name__ == "__main__":
