@@ -13,17 +13,41 @@ DEFAULT_SUMMARY_KEYS = [
     "val/z_cosine",
     "rollout/val/z_mse@10",
     "rollout/val/z_cosine@10",
+    "val/loss",
+    "val/bce",
+    "val/dice_loss",
+    "val/soft_dice",
+    "val/soft_iou",
+    "val/hard_dice",
+    "val/hard_iou",
+    "train/loss",
+    "train/hard_dice",
+    "train/hard_iou",
+    "monitor_value_best",
 ]
-DEFAULT_BASE_KEYS = ["run_id", "name"]
+DEFAULT_BASE_KEYS = ["run_id", "name", "state", "created_at"]
 DEFAULT_CONFIG_KEYS = [
+    "component",
+    "family",
+    "variant",
+    "timestamp",
+    "source_timestamp",
+    "embeddings_model_slug",
+    "source_embeddings_model_slug",
     "d_model",
     "nhead",
     "dim_feedforward",
     "norm_first",
     "batch_size",
+    "epochs",
+    "learning_rate",
     "lr",
     "dataset",
     "dataset/normalize_static_num",
+    "normalize_embeddings",
+    "hard_threshold",
+    "mask_threshold",
+    "prediction_mode",
 ]
 
 

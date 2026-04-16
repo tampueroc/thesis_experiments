@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import tomllib
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -107,7 +108,10 @@ def maybe_tqdm(iterable: Any, *, enabled: bool, desc: str) -> Any:
 
 
 def make_run_id(component: str, family: str, variant: str, decoder_run_name: str, predictor_run_id: str) -> str:
-    return f"{component}-{family}-{variant}-{decoder_run_name}-{predictor_run_id}"
+    launch_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+    decoder_suffix = decoder_run_name.rsplit("-", maxsplit=1)[-1] if "-" in decoder_run_name else decoder_run_name
+    predictor_suffix = predictor_run_id.rsplit("-", maxsplit=1)[-1] if "-" in predictor_run_id else predictor_run_id
+    return f"{component}-{family}-{variant}-dec{decoder_suffix}-pred{predictor_suffix}-{launch_time}"
 
 
 def soft_dice_coefficient_from_logits(logits: Any, target: Any, eps: float = 1e-6) -> Any:
