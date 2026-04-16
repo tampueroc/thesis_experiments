@@ -639,7 +639,7 @@ def main() -> None:
         tag="final",
         num_samples=args.recon_log_samples,
         wandb_handler=wandb_handler,
-        step=best_epoch if best_epoch > 0 else None,
+        step=None,
         hard_threshold=args.hard_threshold,
     )
     summary = {
