@@ -1,0 +1,24 @@
+decoder_run_dir = ""
+predicted_embeddings_dir = ""
+
+component = "latent_decoder_eval"
+family = "conditional_unet_binary_predicted"
+variant = "model_01"
+
+max_sequences = 0
+batch_size = 8
+
+mask_threshold = 0.5
+hard_threshold = 0.4
+recon_log_samples = 4
+num_workers = 0
+device = "auto"
+output_dir = "artifacts/wildfire"
+
+wandb = false
+wandb_project = "latent_wildfire"
+wandb_entity = ""
+wandb_run_name = ""
+wandb_mode = "online"
+wandb_tags = "wildfire,latent_decoder_eval,conditional_unet_binary_predicted,model_01"
+no_progress = false
