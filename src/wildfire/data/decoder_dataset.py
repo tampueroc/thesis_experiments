@@ -124,12 +124,16 @@ class WildfireDecoderDataset:
         binarize_masks: bool = False,
         mask_threshold: float = 0.5,
         normalize_embeddings: bool = False,
+        min_target_idx: int = 1,
         return_tensors: bool = True,
     ) -> None:
+        if min_target_idx < 1:
+            raise ValueError("min_target_idx must be >= 1")
         self._return_tensors = return_tensors
         self._image_channels = int(image_channels)
         self._binarize_masks = bool(binarize_masks)
         self._mask_threshold = float(mask_threshold)
+        self._min_target_idx = int(min_target_idx)
         self._z_by_fire = {
             str(fire_id): np.asarray(values, dtype=np.float32)
             for fire_id, values in embeddings_source.items()
@@ -207,7 +211,7 @@ class WildfireDecoderDataset:
         index: list[_DecoderSampleIndex] = []
         for fire_id in sorted(self._z_by_fire):
             steps = int(self._z_by_fire[fire_id].shape[0])
-            for target_idx in range(1, steps):
+            for target_idx in range(self._min_target_idx, steps):
                 index.append(
                     _DecoderSampleIndex(
                         fire_id=fire_id,
@@ -225,3 +229,136 @@ class WildfireDecoderDataset:
             safe_norms = np.clip(norms, a_min=1e-8, a_max=None).astype(np.float32, copy=False)
             normalized[fire_id] = (array / safe_norms).astype(np.float32, copy=False)
         return normalized
+
+
+class WildfireBlendedDecoderDataset:
+    """Builds decoder samples from real previous embeddings and predicted target embeddings.
+
+    Contract:
+    - prev_image: real frame at t
+    - prev_embedding: real embedding at t
+    - target_embedding: predicted embedding at t+1
+    - target_image: real frame at t+1
+    """
+
+    def __init__(
+        self,
+        prev_embeddings_source: ArrayMap,
+        target_embeddings_source: ArrayMap,
+        frames_source: FramePathMap,
+        image_channels: int = 3,
+        binarize_masks: bool = False,
+        mask_threshold: float = 0.5,
+        normalize_embeddings: bool = False,
+        min_target_idx: int = 1,
+        return_tensors: bool = True,
+    ) -> None:
+        if min_target_idx < 1:
+            raise ValueError("min_target_idx must be >= 1")
+        self._return_tensors = return_tensors
+        self._image_channels = int(image_channels)
+        self._binarize_masks = bool(binarize_masks)
+        self._mask_threshold = float(mask_threshold)
+        self._min_target_idx = int(min_target_idx)
+        self._prev_z_by_fire = {
+            str(fire_id): np.asarray(values, dtype=np.float32)
+            for fire_id, values in prev_embeddings_source.items()
+        }
+        self._target_z_by_fire = {
+            str(fire_id): np.asarray(values, dtype=np.float32)
+            for fire_id, values in target_embeddings_source.items()
+        }
+        if normalize_embeddings:
+            self._prev_z_by_fire = WildfireDecoderDataset._normalize_per_fire_embeddings(self._prev_z_by_fire)
+            self._target_z_by_fire = WildfireDecoderDataset._normalize_per_fire_embeddings(self._target_z_by_fire)
+        self._frames_by_fire = {
+            str(fire_id): [Path(path) for path in paths]
+            for fire_id, paths in frames_source.items()
+        }
+        self._validate_sources()
+        self._sample_index = self._build_sample_index()
+
+    def __len__(self) -> int:
+        return len(self._sample_index)
+
+    def __getitem__(self, idx: object) -> dict[str, object]:
+        if not isinstance(idx, int):
+            raise TypeError(f"index must be int, got {type(idx).__name__}")
+        item = self._sample_index[idx]
+        prev_z = self._prev_z_by_fire[item.fire_id]
+        target_z = self._target_z_by_fire[item.fire_id]
+        frames = self._frames_by_fire[item.fire_id]
+        prev_image = load_mask_tensor(
+            frames[item.prev_idx],
+            image_channels=self._image_channels,
+            binarize_mask=self._binarize_masks,
+            mask_threshold=self._mask_threshold,
+        )
+        target_image = load_mask_tensor(
+            frames[item.target_idx],
+            image_channels=self._image_channels,
+            binarize_mask=self._binarize_masks,
+            mask_threshold=self._mask_threshold,
+        )
+        prev_embedding = prev_z[item.prev_idx]
+        target_embedding = target_z[item.target_idx]
+
+        sample: dict[str, object] = {
+            "prev_image": prev_image,
+            "prev_embedding": prev_embedding,
+            "target_embedding": target_embedding,
+            "target_image": target_image,
+            "fire_id": item.fire_id,
+            "prev_idx": int(item.prev_idx),
+            "target_idx": int(item.target_idx),
+        }
+        if not self._return_tensors:
+            return sample
+        return {
+            "prev_image": _torch_from_numpy(prev_image),
+            "prev_embedding": _torch_from_numpy(prev_embedding),
+            "target_embedding": _torch_from_numpy(target_embedding),
+            "target_image": _torch_from_numpy(target_image),
+            "fire_id": item.fire_id,
+            "prev_idx": int(item.prev_idx),
+            "target_idx": int(item.target_idx),
+        }
+
+    def _validate_sources(self) -> None:
+        missing_target = sorted(set(self._prev_z_by_fire) - set(self._target_z_by_fire))
+        if missing_target:
+            raise ValueError(f"missing target embeddings for fire_ids: {missing_target}")
+        missing_frames = sorted(set(self._prev_z_by_fire) - set(self._frames_by_fire))
+        if missing_frames:
+            raise ValueError(f"missing frames for fire_ids: {missing_frames}")
+        for fire_id, prev_z in self._prev_z_by_fire.items():
+            target_z = self._target_z_by_fire[fire_id]
+            frames = self._frames_by_fire[fire_id]
+            if prev_z.ndim != 2:
+                raise ValueError(f"{fire_id}: expected 2D prev embedding array, got {prev_z.shape}")
+            if target_z.ndim != 2:
+                raise ValueError(f"{fire_id}: expected 2D target embedding array, got {target_z.shape}")
+            if prev_z.shape != target_z.shape:
+                raise ValueError(
+                    f"{fire_id}: prev embedding shape {prev_z.shape} != target embedding shape {target_z.shape}"
+                )
+            if len(frames) != prev_z.shape[0]:
+                raise ValueError(
+                    f"{fire_id}: frame count ({len(frames)}) != embedding steps ({prev_z.shape[0]})"
+                )
+            if prev_z.shape[0] < 2:
+                raise ValueError(f"{fire_id}: need at least 2 timesteps, got {prev_z.shape[0]}")
+
+    def _build_sample_index(self) -> list[_DecoderSampleIndex]:
+        index: list[_DecoderSampleIndex] = []
+        for fire_id in sorted(self._prev_z_by_fire):
+            steps = int(self._prev_z_by_fire[fire_id].shape[0])
+            for target_idx in range(self._min_target_idx, steps):
+                index.append(
+                    _DecoderSampleIndex(
+                        fire_id=fire_id,
+                        prev_idx=target_idx - 1,
+                        target_idx=target_idx,
+                    )
+                )
+        return index

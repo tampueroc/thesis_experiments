@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from wildfire.data.real_data import build_sources
+from wildfire.logging.wandb_handler import WandbHandler
 from wildfire.model_latent_predictor.model_01 import LSTMConfig, LatentLSTMPredictor
 from wildfire.model_latent_predictor.transformer_01 import TransformerConfig, TransformerLatentPredictor
 from wildfire.model_latent_predictor.transformer_static_01 import (
@@ -76,6 +77,42 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional explicit export directory. Default: <run_dir>/predicted_embeddings/<prediction_mode>_<split>/",
     )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Disable tqdm progress bars.",
+    )
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help="Enable Weights & Biases logging for the export run.",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        default="latent_wildfire",
+        help="W&B project name when --wandb is enabled.",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        default="",
+        help="Optional W&B entity/team.",
+    )
+    parser.add_argument(
+        "--wandb-mode",
+        choices=["online", "offline", "disabled"],
+        default="online",
+        help="W&B mode.",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        default="",
+        help="Optional W&B run name. Defaults to export-<source_run_id>-<prediction_mode>-<split>.",
+    )
+    parser.add_argument(
+        "--wandb-tags",
+        default="wildfire,latent_predictor,inference,export",
+        help="Comma-separated W&B tags.",
+    )
     return parser.parse_args()
 
 
@@ -93,6 +130,17 @@ def setup_logging(output_dir: Path) -> None:
     file_handler = logging.FileHandler(log_path, encoding="utf-8")
     file_handler.setFormatter(formatter)
     LOGGER.addHandler(file_handler)
+
+
+def maybe_tqdm(iterable: Any, *, enabled: bool, desc: str) -> Any:
+    if not enabled:
+        return iterable
+    try:
+        from tqdm import tqdm
+    except Exception:
+        LOGGER.warning("tqdm not available; continuing without progress bars")
+        return iterable
+    return tqdm(iterable, desc=desc, leave=True)
 
 
 def resolve_device(device_arg: str) -> Any:
@@ -355,16 +403,59 @@ def main() -> None:
         raise RuntimeError(f"selected split has no sequences: {args.split}")
 
     device = resolve_device(args.device)
+    LOGGER.info("device=%s", device)
     model, is_residual, uses_static = build_model(summary, device)
     state = TORCH.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(state["model_state_dict"])
     model.eval()
 
+    wandb_run_name = (
+        args.wandb_run_name
+        if args.wandb_run_name
+        else f"export-{summary.get('run_id', 'unknown')}-{args.prediction_mode}-{args.split}"
+    )
+    wandb_tags = [tag.strip() for tag in args.wandb_tags.split(",") if tag.strip()]
+    wandb_handler = WandbHandler(
+        enabled=args.wandb and args.wandb_mode != "disabled",
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        run_name=wandb_run_name,
+        output_dir=output_dir,
+        tags=wandb_tags,
+        mode=args.wandb_mode,
+        config={
+            "component": "latent_predictor_export",
+            "source_run_id": str(summary.get("run_id", "")),
+            "source_variant": str(summary.get("variant", "")),
+            "source_family": str(summary.get("family", "")),
+            "source_timestamp": timestamp,
+            "source_embeddings_model_slug": embeddings_model_slug,
+            "split": args.split,
+            "prediction_mode": args.prediction_mode,
+            "history": history,
+            "normalize_embeddings": normalize_embeddings,
+            "uses_static": uses_static,
+            "is_residual": is_residual,
+            "device": str(device),
+        },
+    )
+
     output_dir.mkdir(parents=True, exist_ok=True)
     exported_sequences: list[dict[str, Any]] = []
     skipped_sequences: list[dict[str, Any]] = []
+    ordered_ids = sorted(selected_ids)
+    total_sequences = len(ordered_ids)
+    LOGGER.info(
+        "starting inference over %d sequences (uses_static=%s residual=%s)",
+        total_sequences,
+        uses_static,
+        is_residual,
+    )
     with TORCH.no_grad():
-        for fire_id in sorted(selected_ids):
+        for index, fire_id in enumerate(
+            maybe_tqdm(ordered_ids, enabled=not args.no_progress, desc="inference"),
+            start=1,
+        ):
             z = z_by_fire[fire_id]
             g = g_by_fire[fire_id]
             try:
@@ -389,6 +480,22 @@ def main() -> None:
                         "reason": str(exc),
                     }
                 )
+                LOGGER.info(
+                    "[skip %04d/%04d] %s num_frames=%d reason=%s",
+                    index,
+                    total_sequences,
+                    fire_id,
+                    int(z.shape[0]),
+                    str(exc),
+                )
+                wandb_handler.log_metrics(
+                    {
+                        "export/processed_sequences": float(index),
+                        "export/exported_sequences": float(len(exported_sequences)),
+                        "export/skipped_sequences": float(len(skipped_sequences)),
+                    },
+                    step=index,
+                )
                 continue
             seq_path = (output_dir / f"{fire_id}.npy").resolve()
             np.save(seq_path, exported.astype(np.float32, copy=False))
@@ -399,6 +506,23 @@ def main() -> None:
                     "num_frames": int(exported.shape[0]),
                     "num_predicted_frames": max(0, int(exported.shape[0]) - history),
                 }
+            )
+            if index == 1 or index == total_sequences or (index % 100) == 0:
+                LOGGER.info(
+                    "[inference %04d/%04d] %s num_frames=%d num_predicted=%d",
+                    index,
+                    total_sequences,
+                    fire_id,
+                    int(exported.shape[0]),
+                    max(0, int(exported.shape[0]) - history),
+                )
+            wandb_handler.log_metrics(
+                {
+                    "export/processed_sequences": float(index),
+                    "export/exported_sequences": float(len(exported_sequences)),
+                    "export/skipped_sequences": float(len(skipped_sequences)),
+                },
+                step=index,
             )
 
     export_manifest = {
@@ -434,6 +558,20 @@ def main() -> None:
         output_dir,
         len(skipped_sequences),
     )
+    wandb_handler.log_summary(
+        {
+            "source_run_id": str(summary.get("run_id", "")),
+            "source_variant": str(summary.get("variant", "")),
+            "prediction_mode": args.prediction_mode,
+            "split": args.split,
+            "history": history,
+            "device": str(device),
+            "exported_sequences": len(exported_sequences),
+            "skipped_sequences": len(skipped_sequences),
+            "output_dir": str(output_dir),
+        }
+    )
+    wandb_handler.finish()
 
 
 if __name__ == "__main__":

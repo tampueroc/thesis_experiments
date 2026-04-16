@@ -6,7 +6,7 @@ import numpy as np
 from PIL import Image
 import pytest
 
-from wildfire.data.decoder_dataset import WildfireDecoderDataset
+from wildfire.data.decoder_dataset import WildfireBlendedDecoderDataset, WildfireDecoderDataset
 
 
 def _write_gray_image(path: Path, value: int) -> None:
@@ -122,3 +122,68 @@ def test_decoder_dataset_binarizes_masks(tmp_path: Path) -> None:
     target_image = np.asarray(sample["target_image"], dtype=np.float32)
     assert np.array_equal(np.unique(prev_image), np.array([0.0], dtype=np.float32))
     assert np.array_equal(np.unique(target_image), np.array([1.0], dtype=np.float32))
+
+
+def test_blended_decoder_dataset_uses_real_prev_and_predicted_target(tmp_path: Path) -> None:
+    seq_dir = tmp_path / "sequence_001"
+    seq_dir.mkdir()
+    for idx, value in enumerate([0, 255, 0, 255]):
+        _write_gray_image(seq_dir / f"fire_{idx:03d}.png", value)
+
+    real_z = np.array(
+        [
+            [1.0, 1.0],
+            [2.0, 2.0],
+            [3.0, 3.0],
+            [4.0, 4.0],
+        ],
+        dtype=np.float32,
+    )
+    pred_z = np.array(
+        [
+            [10.0, 10.0],
+            [20.0, 20.0],
+            [30.0, 30.0],
+            [40.0, 40.0],
+        ],
+        dtype=np.float32,
+    )
+
+    ds = WildfireBlendedDecoderDataset(
+        prev_embeddings_source={"sequence_001": real_z},
+        target_embeddings_source={"sequence_001": pred_z},
+        frames_source={"sequence_001": [seq_dir / f"fire_{idx:03d}.png" for idx in range(4)]},
+        image_channels=1,
+        min_target_idx=2,
+        return_tensors=False,
+    )
+
+    assert len(ds) == 2
+    sample = ds[0]
+    prev_embedding = np.asarray(sample["prev_embedding"], dtype=np.float32)
+    target_embedding = np.asarray(sample["target_embedding"], dtype=np.float32)
+    assert sample["prev_idx"] == 1
+    assert sample["target_idx"] == 2
+    assert np.array_equal(prev_embedding, np.array([2.0, 2.0], dtype=np.float32))
+    assert np.array_equal(target_embedding, np.array([30.0, 30.0], dtype=np.float32))
+
+
+def test_decoder_dataset_respects_min_target_idx(tmp_path: Path) -> None:
+    seq_dir = tmp_path / "sequence_001"
+    seq_dir.mkdir()
+    for idx, value in enumerate([0, 255, 0, 255]):
+        _write_gray_image(seq_dir / f"fire_{idx:03d}.png", value)
+
+    z = np.arange(4 * 2, dtype=np.float32).reshape(4, 2)
+    ds = WildfireDecoderDataset(
+        embeddings_source={"sequence_001": z},
+        frames_source={"sequence_001": [seq_dir / f"fire_{idx:03d}.png" for idx in range(4)]},
+        image_channels=1,
+        min_target_idx=2,
+        return_tensors=False,
+    )
+
+    assert len(ds) == 2
+    sample = ds[0]
+    assert sample["prev_idx"] == 1
+    assert sample["target_idx"] == 2
