@@ -1,0 +1,51 @@
+component = "latent_predictor"
+family = "transformer"
+variant = "model_01_static_head"
+
+dataset_windowing = "fixed"
+dataset_history = 5
+dataset_stride = 1
+dataset_sampling = "random_end_index"
+normalize_embeddings = true
+normalize_static_num = true
+
+embeddings_root = "/home/tampuero/data/thesis_data/embeddings"
+landscape_dir = "/home/tampuero/data/thesis_data/landscape"
+timestamp = ""
+input_type = "isochrones"
+embeddings_model_slug = "facebook__dinov2-small"
+
+max_sequences = 0
+train_ratio = 0.7
+val_ratio = 0.15
+seed = 7
+
+batch_size = 64
+epochs = 300
+learning_rate = 0.0005
+d_model = 512
+nhead = 8
+num_layers = 4
+dim_feedforward = 1024
+dropout = 0.1
+static_hidden_dim = 256
+static_cat_embed_dim = 32
+norm_first = false
+num_workers = 4
+device = "auto"
+
+output_dir = "artifacts/wildfire"
+
+wandb = true
+wandb_project = "latent_wildfire"
+wandb_entity = ""
+wandb_run_name = ""
+wandb_mode = "online"
+wandb_tags = "wildfire,latent_predictor,transformer,model_01_static_head,long,normalized,isochrones"
+
+[early_stopping]
+enabled = true
+metric = "val/z_mse"
+mode = "min"
+patience = 12
+min_delta = 1e-5
