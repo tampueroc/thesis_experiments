@@ -104,7 +104,7 @@ The predicted-latent decoder evaluation only used timesteps where both latent in
 With history length $5$:
 
 - first predicted latent appears once a full 5-step context exists
-- decoder evaluation starts at $text(target_idx) = 6$
+- decoder evaluation starts at $text("target_idx") = 6$
 
 So the pipeline does not evaluate all sequence timesteps. It evaluates only the subset where the invariant
 
