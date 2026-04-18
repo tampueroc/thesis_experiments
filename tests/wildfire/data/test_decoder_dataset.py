@@ -6,7 +6,11 @@ import numpy as np
 from PIL import Image
 import pytest
 
-from wildfire.data.decoder_dataset import WildfireBlendedDecoderDataset, WildfireDecoderDataset
+from wildfire.data.decoder_dataset import (
+    WildfireBlendedDecoderDataset,
+    WildfireDecoderDataset,
+    WildfireLandscapeDecoderDataset,
+)
 
 
 def _write_gray_image(path: Path, value: int) -> None:
@@ -187,3 +191,32 @@ def test_decoder_dataset_respects_min_target_idx(tmp_path: Path) -> None:
     sample = ds[0]
     assert sample["prev_idx"] == 1
     assert sample["target_idx"] == 2
+
+
+def test_landscape_decoder_dataset_returns_spatial_landscape(tmp_path: Path) -> None:
+    seq_dir = tmp_path / "sequence_001"
+    seq_dir.mkdir()
+    _write_gray_image(seq_dir / "fire_000.png", 0)
+    _write_gray_image(seq_dir / "fire_001.png", 255)
+
+    z = np.arange(2 * 2, dtype=np.float32).reshape(2, 2)
+    landscape = np.stack(
+        [
+            np.full((400, 400), 0.25, dtype=np.float32),
+            np.full((400, 400), 0.75, dtype=np.float32),
+        ],
+        axis=0,
+    )
+    ds = WildfireLandscapeDecoderDataset(
+        embeddings_source={"sequence_001": z},
+        frames_source={"sequence_001": [seq_dir / "fire_000.png", seq_dir / "fire_001.png"]},
+        landscape_source={"sequence_001": landscape},
+        image_channels=1,
+        return_tensors=False,
+    )
+
+    sample = ds[0]
+    landscape_sample = np.asarray(sample["landscape"], dtype=np.float32)
+    assert tuple(landscape_sample.shape) == (2, 400, 400)
+    assert np.allclose(landscape_sample[0], 0.25)
+    assert np.allclose(landscape_sample[1], 0.75)

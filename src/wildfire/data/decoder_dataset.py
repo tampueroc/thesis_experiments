@@ -10,9 +10,12 @@ import numpy as np
 import torch
 from PIL import Image
 
+from wildfire.data.real_data import parse_sequence_num
+
 
 ArrayMap = Mapping[str, np.ndarray]
 FramePathMap = Mapping[str, list[Path]]
+LandscapeMap = Mapping[str, np.ndarray]
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
 FRAME_INDEX_PATTERN = re.compile(r"(\d+)(?!.*\d)")
 
@@ -104,6 +107,53 @@ def build_decoder_sources(
         frames_by_fire[sequence_id] = ordered_frames
 
     return z_by_fire, frames_by_fire
+
+
+def _resize_chw_nearest(chw: np.ndarray, out_hw: tuple[int, int]) -> np.ndarray:
+    out_h, out_w = [int(v) for v in out_hw]
+    if chw.ndim != 3:
+        raise ValueError(f"expected CHW array, got {chw.shape}")
+    if chw.shape[1:] == (out_h, out_w):
+        return chw.astype(np.float32, copy=False)
+    resized_channels: list[np.ndarray] = []
+    for channel in chw:
+        image = Image.fromarray(np.asarray(channel, dtype=np.float32), mode="F")
+        resized = image.resize((out_w, out_h), resample=Image.Resampling.NEAREST)
+        resized_channels.append(np.asarray(resized, dtype=np.float32))
+    return np.stack(resized_channels, axis=0).astype(np.float32, copy=False)
+
+
+def build_landscape_patch_sources(
+    landscape_dir: Path,
+    frames_by_fire: FramePathMap,
+) -> dict[str, np.ndarray]:
+    landscape_chw_path = landscape_dir / "landscape_channels_chw.npy"
+    indices_path = landscape_dir / "indices.json"
+    if not landscape_chw_path.exists():
+        raise FileNotFoundError(f"landscape CHW array not found: {landscape_chw_path}")
+    if not indices_path.exists():
+        raise FileNotFoundError(f"indices.json not found: {indices_path}")
+
+    landscape_chw = np.asarray(np.load(landscape_chw_path), dtype=np.float32)
+    if landscape_chw.ndim != 3:
+        raise ValueError(f"expected CHW landscape array, got {landscape_chw.shape}")
+    indices = json.loads(indices_path.read_text(encoding="utf-8"))
+
+    out: dict[str, np.ndarray] = {}
+    for fire_id, frame_paths in frames_by_fire.items():
+        if not frame_paths:
+            raise ValueError(f"{fire_id}: empty frame path list")
+        bbox = indices.get(str(parse_sequence_num(fire_id)))
+        if not isinstance(bbox, list | tuple) or len(bbox) != 4:
+            raise ValueError(f"{fire_id}: invalid bbox in indices.json: {bbox}")
+        row_start, row_end, col_start, col_end = [int(v) for v in bbox]
+        patch = landscape_chw[:, row_start:row_end, col_start:col_end]
+        if patch.ndim != 3 or patch.shape[1] == 0 or patch.shape[2] == 0:
+            raise ValueError(f"{fire_id}: invalid landscape patch shape {patch.shape}")
+        with Image.open(frame_paths[0]) as image:
+            width, height = image.convert("L").size
+        out[fire_id] = _resize_chw_nearest(patch, (height, width))
+    return out
 
 
 @dataclass(frozen=True)
@@ -353,6 +403,135 @@ class WildfireBlendedDecoderDataset:
         index: list[_DecoderSampleIndex] = []
         for fire_id in sorted(self._prev_z_by_fire):
             steps = int(self._prev_z_by_fire[fire_id].shape[0])
+            for target_idx in range(self._min_target_idx, steps):
+                index.append(
+                    _DecoderSampleIndex(
+                        fire_id=fire_id,
+                        prev_idx=target_idx - 1,
+                        target_idx=target_idx,
+                    )
+                )
+        return index
+
+
+class WildfireLandscapeDecoderDataset:
+    """Builds decoder samples with per-fire spatial landscape conditioning."""
+
+    def __init__(
+        self,
+        embeddings_source: ArrayMap,
+        frames_source: FramePathMap,
+        landscape_source: LandscapeMap,
+        image_channels: int = 1,
+        binarize_masks: bool = False,
+        mask_threshold: float = 0.5,
+        normalize_embeddings: bool = False,
+        min_target_idx: int = 1,
+        return_tensors: bool = True,
+    ) -> None:
+        if min_target_idx < 1:
+            raise ValueError("min_target_idx must be >= 1")
+        self._return_tensors = return_tensors
+        self._image_channels = int(image_channels)
+        self._binarize_masks = bool(binarize_masks)
+        self._mask_threshold = float(mask_threshold)
+        self._min_target_idx = int(min_target_idx)
+        self._z_by_fire = {
+            str(fire_id): np.asarray(values, dtype=np.float32)
+            for fire_id, values in embeddings_source.items()
+        }
+        if normalize_embeddings:
+            self._z_by_fire = WildfireDecoderDataset._normalize_per_fire_embeddings(self._z_by_fire)
+        self._frames_by_fire = {
+            str(fire_id): [Path(path) for path in paths]
+            for fire_id, paths in frames_source.items()
+        }
+        self._landscape_by_fire = {
+            str(fire_id): np.asarray(values, dtype=np.float32)
+            for fire_id, values in landscape_source.items()
+        }
+        self._validate_sources()
+        self._sample_index = self._build_sample_index()
+
+    def __len__(self) -> int:
+        return len(self._sample_index)
+
+    def __getitem__(self, idx: object) -> dict[str, object]:
+        if not isinstance(idx, int):
+            raise TypeError(f"index must be int, got {type(idx).__name__}")
+        item = self._sample_index[idx]
+        z = self._z_by_fire[item.fire_id]
+        frames = self._frames_by_fire[item.fire_id]
+        prev_image = load_mask_tensor(
+            frames[item.prev_idx],
+            image_channels=self._image_channels,
+            binarize_mask=self._binarize_masks,
+            mask_threshold=self._mask_threshold,
+        )
+        target_image = load_mask_tensor(
+            frames[item.target_idx],
+            image_channels=self._image_channels,
+            binarize_mask=self._binarize_masks,
+            mask_threshold=self._mask_threshold,
+        )
+        landscape = self._landscape_by_fire[item.fire_id]
+        prev_embedding = z[item.prev_idx]
+        target_embedding = z[item.target_idx]
+
+        sample: dict[str, object] = {
+            "prev_image": prev_image,
+            "landscape": landscape,
+            "prev_embedding": prev_embedding,
+            "target_embedding": target_embedding,
+            "target_image": target_image,
+            "fire_id": item.fire_id,
+            "prev_idx": int(item.prev_idx),
+            "target_idx": int(item.target_idx),
+        }
+        if not self._return_tensors:
+            return sample
+        return {
+            "prev_image": _torch_from_numpy(prev_image),
+            "landscape": _torch_from_numpy(landscape),
+            "prev_embedding": _torch_from_numpy(prev_embedding),
+            "target_embedding": _torch_from_numpy(target_embedding),
+            "target_image": _torch_from_numpy(target_image),
+            "fire_id": item.fire_id,
+            "prev_idx": int(item.prev_idx),
+            "target_idx": int(item.target_idx),
+        }
+
+    def _validate_sources(self) -> None:
+        missing_frames = sorted(set(self._z_by_fire) - set(self._frames_by_fire))
+        if missing_frames:
+            raise ValueError(f"missing frames for fire_ids: {missing_frames}")
+        missing_landscape = sorted(set(self._z_by_fire) - set(self._landscape_by_fire))
+        if missing_landscape:
+            raise ValueError(f"missing landscape for fire_ids: {missing_landscape}")
+        for fire_id, z in self._z_by_fire.items():
+            if z.ndim != 2:
+                raise ValueError(f"{fire_id}: expected 2D embedding array, got {z.shape}")
+            frames = self._frames_by_fire[fire_id]
+            if len(frames) != z.shape[0]:
+                raise ValueError(
+                    f"{fire_id}: frame count ({len(frames)}) != embedding steps ({z.shape[0]})"
+                )
+            if z.shape[0] < 2:
+                raise ValueError(f"{fire_id}: need at least 2 timesteps, got {z.shape[0]}")
+            landscape = self._landscape_by_fire[fire_id]
+            if landscape.ndim != 3:
+                raise ValueError(f"{fire_id}: expected CHW landscape array, got {landscape.shape}")
+            with Image.open(frames[0]) as image:
+                width, height = image.convert("L").size
+            if landscape.shape[1:] != (height, width):
+                raise ValueError(
+                    f"{fire_id}: landscape shape {landscape.shape[1:]} != frame size {(height, width)}"
+                )
+
+    def _build_sample_index(self) -> list[_DecoderSampleIndex]:
+        index: list[_DecoderSampleIndex] = []
+        for fire_id in sorted(self._z_by_fire):
+            steps = int(self._z_by_fire[fire_id].shape[0])
             for target_idx in range(self._min_target_idx, steps):
                 index.append(
                     _DecoderSampleIndex(
