@@ -8,8 +8,10 @@ landscape_chw_dir = ""
 timestamp = ""
 input_type = "isochrones"
 embeddings_model_slug = "facebook__dinov2-small"
+landscape_channel_indices = "2,3,4"
 
 normalize_embeddings = true
+normalize_landscape = true
 max_sequences = 0
 train_ratio = 0.7
 val_ratio = 0.15

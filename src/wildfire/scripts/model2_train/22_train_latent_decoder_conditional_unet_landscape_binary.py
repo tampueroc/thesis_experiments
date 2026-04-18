@@ -19,6 +19,9 @@ from wildfire.data.decoder_dataset import (
     WildfireLandscapeDecoderDataset,
     build_decoder_sources,
     build_landscape_patch_sources,
+    compute_landscape_channel_stats,
+    normalize_landscape_sources,
+    select_landscape_channels,
 )
 from wildfire.data.real_data import choose_timestamp
 from wildfire.logging.wandb_handler import WandbHandler
@@ -71,6 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timestamp", default=cfg_value("timestamp", ""))
     parser.add_argument("--input-type", choices=["fire_frames", "isochrones"], default=cfg_value("input_type", "fire_frames"))
     parser.add_argument("--embeddings-model-slug", default=cfg_value("embeddings_model_slug", cfg_value("model_slug", "facebook__dinov2-small")))
+    parser.add_argument("--landscape-channel-indices", default=str(cfg_value("landscape_channel_indices", "2,3,4")))
     parser.add_argument("--component", default=cfg_value("component", "latent_decoder"))
     parser.add_argument("--family", default=cfg_value("family", "conditional_unet_landscape_binary"))
     parser.add_argument("--variant", default=cfg_value("variant", "model_01"))
@@ -88,6 +92,9 @@ def parse_args() -> argparse.Namespace:
     parser.set_defaults(normalize_embeddings=bool(cfg_value("normalize_embeddings", False)))
     parser.add_argument("--normalize-embeddings", dest="normalize_embeddings", action="store_true")
     parser.add_argument("--no-normalize-embeddings", dest="normalize_embeddings", action="store_false")
+    parser.set_defaults(normalize_landscape=bool(cfg_value("normalize_landscape", True)))
+    parser.add_argument("--normalize-landscape", dest="normalize_landscape", action="store_true")
+    parser.add_argument("--no-normalize-landscape", dest="normalize_landscape", action="store_false")
     parser.add_argument("--dice-loss-weight", type=float, default=float(cfg_value("dice_loss_weight", 1.0)))
     parser.add_argument("--mask-threshold", type=float, default=float(cfg_value("mask_threshold", 0.5)))
     parser.add_argument("--hard-threshold", type=float, default=float(cfg_value("hard_threshold", 0.4)))
@@ -110,6 +117,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--early-stop-enabled", action="store_true", default=bool(early_value("enabled", False)))
     parser.add_argument("--no-early-stop", action="store_false", dest="early_stop_enabled")
     return parser.parse_args()
+
+
+def parse_channel_indices(spec: str) -> tuple[int, ...]:
+    values = [part.strip() for part in spec.split(",") if part.strip()]
+    if not values:
+        raise ValueError("landscape_channel_indices must be non-empty")
+    return tuple(int(v) for v in values)
 
 
 def resolve_device(device_name: str) -> Any:
@@ -394,7 +408,15 @@ def main() -> int:
         frames_by_fire = {fire_id: frames_by_fire[fire_id] for fire_id in limited_ids}
     landscape_chw_dir = args.landscape_chw_dir if args.landscape_chw_dir is not None else args.landscape_dir
     landscape_by_fire = build_landscape_patch_sources(landscape_chw_dir, args.landscape_dir, frames_by_fire)
+    channel_indices = parse_channel_indices(args.landscape_channel_indices)
+    landscape_by_fire = select_landscape_channels(landscape_by_fire, channel_indices)
     train_ids, val_ids, holdout_ids = split_fire_ids(list(z_by_fire.keys()), args.train_ratio, args.val_ratio, args.seed)
+    train_landscape = {k: landscape_by_fire[k] for k in train_ids}
+    landscape_mean = np.zeros((len(channel_indices),), dtype=np.float32)
+    landscape_std = np.ones((len(channel_indices),), dtype=np.float32)
+    if args.normalize_landscape:
+        landscape_mean, landscape_std = compute_landscape_channel_stats(train_landscape)
+        landscape_by_fire = normalize_landscape_sources(landscape_by_fire, landscape_mean, landscape_std)
     train_ds = WildfireLandscapeDecoderDataset(
         *select_sources(z_by_fire, frames_by_fire, landscape_by_fire, train_ids),
         image_channels=1,
@@ -449,8 +471,10 @@ def main() -> int:
     LOGGER.info("landscape_chw_dir=%s", landscape_chw_dir)
     LOGGER.info("output_dir=%s", run_dir)
     LOGGER.info("normalize_embeddings=%s", args.normalize_embeddings)
+    LOGGER.info("normalize_landscape=%s", args.normalize_landscape)
     LOGGER.info("mask_threshold=%.3f hard_threshold=%.3f", args.mask_threshold, args.hard_threshold)
     LOGGER.info("landscape_channels=%d", int(landscape.shape[0]))
+    LOGGER.info("landscape_channel_indices=%s", channel_indices)
     wandb_tags = [x.strip() for x in args.wandb_tags.split(",") if x.strip()] or ["wildfire", args.component, args.family, args.variant]
     wandb_handler = WandbHandler(
         enabled=args.wandb and args.wandb_mode != "disabled",
@@ -472,6 +496,10 @@ def main() -> int:
             "mask_threshold": args.mask_threshold,
             "hard_threshold": args.hard_threshold,
             "normalize_embeddings": args.normalize_embeddings,
+            "normalize_landscape": args.normalize_landscape,
+            "landscape_channel_indices": list(channel_indices),
+            "landscape_mean": landscape_mean.tolist(),
+            "landscape_std": landscape_std.tolist(),
             "input_type": args.input_type,
             "landscape_channels": int(landscape.shape[0]),
             "embeddings_model_slug": args.embeddings_model_slug,
@@ -548,6 +576,9 @@ def main() -> int:
         "monitor_metric": args.early_stop_metric,
         "monitor_value_best": best_metric_value,
         "device": str(device),
+        "landscape_channel_indices": list(channel_indices),
+        "landscape_mean": landscape_mean.tolist(),
+        "landscape_std": landscape_std.tolist(),
         "splits": {
             "train_fire_ids": len(train_ids),
             "val_fire_ids": len(val_ids),

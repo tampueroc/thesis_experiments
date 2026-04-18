@@ -16,6 +16,7 @@ from wildfire.data.real_data import parse_sequence_num
 ArrayMap = Mapping[str, np.ndarray]
 FramePathMap = Mapping[str, list[Path]]
 LandscapeMap = Mapping[str, np.ndarray]
+NODATA_VALUE = -1.0
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
 FRAME_INDEX_PATTERN = re.compile(r"(\d+)(?!.*\d)")
 
@@ -154,6 +155,78 @@ def build_landscape_patch_sources(
         with Image.open(frame_paths[0]) as image:
             width, height = image.convert("L").size
         out[fire_id] = _resize_chw_nearest(patch, (height, width))
+    return out
+
+
+def select_landscape_channels(
+    landscape_by_fire: LandscapeMap,
+    channel_indices: tuple[int, ...],
+) -> dict[str, np.ndarray]:
+    if not channel_indices:
+        raise ValueError("channel_indices must be non-empty")
+    out: dict[str, np.ndarray] = {}
+    for fire_id, arr in landscape_by_fire.items():
+        chw = np.asarray(arr, dtype=np.float32)
+        if chw.ndim != 3:
+            raise ValueError(f"{fire_id}: expected CHW landscape array, got {chw.shape}")
+        max_idx = chw.shape[0] - 1
+        for idx in channel_indices:
+            if idx < 0 or idx > max_idx:
+                raise ValueError(f"{fire_id}: channel index {idx} out of bounds for {chw.shape[0]} channels")
+        out[str(fire_id)] = chw[np.asarray(channel_indices, dtype=np.int64)]
+    return out
+
+
+def compute_landscape_channel_stats(
+    landscape_by_fire: LandscapeMap,
+    nodata_value: float = NODATA_VALUE,
+) -> tuple[np.ndarray, np.ndarray]:
+    means: list[float] = []
+    stds: list[float] = []
+    sample = next(iter(landscape_by_fire.values()))
+    channel_count = int(np.asarray(sample).shape[0])
+    for channel_idx in range(channel_count):
+        valid_values: list[np.ndarray] = []
+        for arr in landscape_by_fire.values():
+            plane = np.asarray(arr, dtype=np.float32)[channel_idx]
+            valid = plane[plane != nodata_value]
+            if valid.size > 0:
+                valid_values.append(valid)
+        if not valid_values:
+            means.append(0.0)
+            stds.append(1.0)
+            continue
+        merged = np.concatenate(valid_values, axis=0)
+        mean = float(merged.mean())
+        std = float(merged.std())
+        means.append(mean)
+        stds.append(std if std > 1e-8 else 1.0)
+    return np.asarray(means, dtype=np.float32), np.asarray(stds, dtype=np.float32)
+
+
+def normalize_landscape_sources(
+    landscape_by_fire: LandscapeMap,
+    mean: np.ndarray,
+    std: np.ndarray,
+    nodata_value: float = NODATA_VALUE,
+) -> dict[str, np.ndarray]:
+    out: dict[str, np.ndarray] = {}
+    for fire_id, arr in landscape_by_fire.items():
+        chw = np.asarray(arr, dtype=np.float32).copy()
+        if chw.ndim != 3:
+            raise ValueError(f"{fire_id}: expected CHW landscape array, got {chw.shape}")
+        if chw.shape[0] != mean.shape[0] or chw.shape[0] != std.shape[0]:
+            raise ValueError(
+                f"{fire_id}: channel mismatch for normalization, got {chw.shape[0]} vs mean/std {mean.shape[0]}"
+            )
+        for channel_idx in range(chw.shape[0]):
+            plane = chw[channel_idx]
+            valid_mask = plane != nodata_value
+            if np.any(valid_mask):
+                plane[valid_mask] = (plane[valid_mask] - mean[channel_idx]) / std[channel_idx]
+            plane[~valid_mask] = 0.0
+            chw[channel_idx] = plane
+        out[str(fire_id)] = chw.astype(np.float32, copy=False)
     return out
 
 
