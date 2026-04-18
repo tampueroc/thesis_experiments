@@ -124,11 +124,12 @@ def _resize_chw_nearest(chw: np.ndarray, out_hw: tuple[int, int]) -> np.ndarray:
 
 
 def build_landscape_patch_sources(
-    landscape_dir: Path,
+    landscape_chw_dir: Path,
+    indices_dir: Path,
     frames_by_fire: FramePathMap,
 ) -> dict[str, np.ndarray]:
-    landscape_chw_path = landscape_dir / "landscape_channels_chw.npy"
-    indices_path = landscape_dir / "indices.json"
+    landscape_chw_path = landscape_chw_dir / "landscape_channels_chw.npy"
+    indices_path = indices_dir / "indices.json"
     if not landscape_chw_path.exists():
         raise FileNotFoundError(f"landscape CHW array not found: {landscape_chw_path}")
     if not indices_path.exists():

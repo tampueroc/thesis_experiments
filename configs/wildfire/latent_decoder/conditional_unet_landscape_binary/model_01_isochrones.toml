@@ -4,6 +4,7 @@ variant = "model_01_isochrones"
 
 embeddings_root = "/home/tampuero/data/thesis_data/embeddings"
 landscape_dir = "/home/tampuero/data/thesis_data/landscape"
+landscape_chw_dir = ""
 timestamp = ""
 input_type = "isochrones"
 embeddings_model_slug = "facebook__dinov2-small"
