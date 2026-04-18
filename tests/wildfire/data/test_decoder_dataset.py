@@ -10,6 +10,9 @@ from wildfire.data.decoder_dataset import (
     WildfireBlendedDecoderDataset,
     WildfireDecoderDataset,
     WildfireLandscapeDecoderDataset,
+    compute_landscape_channel_stats,
+    normalize_landscape_sources,
+    select_landscape_channels,
 )
 
 
@@ -220,3 +223,23 @@ def test_landscape_decoder_dataset_returns_spatial_landscape(tmp_path: Path) -> 
     assert tuple(landscape_sample.shape) == (2, 400, 400)
     assert np.allclose(landscape_sample[0], 0.25)
     assert np.allclose(landscape_sample[1], 0.75)
+
+
+def test_select_and_normalize_landscape_sources() -> None:
+    landscape_by_fire = {
+        "sequence_001": np.asarray(
+            [
+                [[1.0, 2.0], [3.0, -1.0]],
+                [[10.0, 20.0], [30.0, 40.0]],
+                [[100.0, 200.0], [300.0, 400.0]],
+            ],
+            dtype=np.float32,
+        )
+    }
+    selected = select_landscape_channels(landscape_by_fire, (0, 2))
+    assert selected["sequence_001"].shape == (2, 2, 2)
+    mean, std = compute_landscape_channel_stats(selected)
+    normalized = normalize_landscape_sources(selected, mean, std)
+    arr = normalized["sequence_001"]
+    assert arr.shape == (2, 2, 2)
+    assert float(arr[0, 1, 1]) == 0.0
