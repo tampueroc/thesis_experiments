@@ -63,6 +63,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--embeddings-root", type=Path, default=Path(cfg_value("embeddings_root", "/home/tampuero/data/thesis_data/embeddings")))
     parser.add_argument("--landscape-dir", type=Path, default=Path(cfg_value("landscape_dir", "/home/tampuero/data/thesis_data/landscape")))
+    parser.add_argument(
+        "--landscape-chw-dir",
+        type=Path,
+        default=Path(cfg_value("landscape_chw_dir", "")) if str(cfg_value("landscape_chw_dir", "")) else None,
+    )
     parser.add_argument("--timestamp", default=cfg_value("timestamp", ""))
     parser.add_argument("--input-type", choices=["fire_frames", "isochrones"], default=cfg_value("input_type", "fire_frames"))
     parser.add_argument("--embeddings-model-slug", default=cfg_value("embeddings_model_slug", cfg_value("model_slug", "facebook__dinov2-small")))
@@ -387,7 +392,8 @@ def main() -> int:
         limited_ids = sorted(z_by_fire)[: args.max_sequences]
         z_by_fire = {fire_id: z_by_fire[fire_id] for fire_id in limited_ids}
         frames_by_fire = {fire_id: frames_by_fire[fire_id] for fire_id in limited_ids}
-    landscape_by_fire = build_landscape_patch_sources(args.landscape_dir, frames_by_fire)
+    landscape_chw_dir = args.landscape_chw_dir if args.landscape_chw_dir is not None else args.landscape_dir
+    landscape_by_fire = build_landscape_patch_sources(landscape_chw_dir, args.landscape_dir, frames_by_fire)
     train_ids, val_ids, holdout_ids = split_fire_ids(list(z_by_fire.keys()), args.train_ratio, args.val_ratio, args.seed)
     train_ds = WildfireLandscapeDecoderDataset(
         *select_sources(z_by_fire, frames_by_fire, landscape_by_fire, train_ids),
@@ -440,6 +446,7 @@ def main() -> int:
     LOGGER.info("run_id=%s", run_id)
     LOGGER.info("model_dir=%s", model_dir)
     LOGGER.info("landscape_dir=%s", args.landscape_dir)
+    LOGGER.info("landscape_chw_dir=%s", landscape_chw_dir)
     LOGGER.info("output_dir=%s", run_dir)
     LOGGER.info("normalize_embeddings=%s", args.normalize_embeddings)
     LOGGER.info("mask_threshold=%.3f hard_threshold=%.3f", args.mask_threshold, args.hard_threshold)
