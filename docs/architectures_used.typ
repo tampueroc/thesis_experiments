@@ -1,8 +1,17 @@
-= Architectures Used For Latent Prediction
+= Architectures Used In The Wildfire Pipeline
 
-This document summarizes the latent temporal predictors used in this repository for wildfire spread forecasting in embedding space.
+This document summarizes the main architectures used in this repository for wildfire spread forecasting.
 
-== Shared Setup
+The pipeline has two learned stages:
+
+- Model One: latent temporal prediction in embedding space
+- Model Two: latent-conditioned spatial decoding back to the next wildfire image
+
+The first half of this document describes the latent temporal predictors. The second half describes the decoder families used to reconstruct the next image from latent states.
+
+== Part I: Model One Latent Predictors
+
+=== Shared Setup
 
 At each time step $t$, the fire mask is encoded into a latent vector
 
@@ -32,7 +41,7 @@ with
 
 $hat(z)_(t+1) = z_t + hat(Delta z)_(t+1)$
 
-== 1. LSTM Predictor
+=== 1. LSTM Predictor
 
 File:
 
@@ -51,7 +60,7 @@ Key characteristics:
 - used for the `lstm/model_01*` configs
 - training loss is direct latent MSE on $hat(z)_(t+1)$
 
-== 2. Plain Transformer Predictor
+=== 2. Plain Transformer Predictor
 
 File:
 
@@ -74,7 +83,7 @@ Key characteristics:
 - no static conditioning
 - used for `transformer/model_01_*` configs with `family = "transformer"`
 
-== 3. Residual Transformer Predictor
+=== 3. Residual Transformer Predictor
 
 Trainer:
 
@@ -97,7 +106,7 @@ Key characteristics:
 - useful when temporal evolution is easier to model as an increment
 - used for `transformer/model_01_residual_*`
 
-== 4. Static-Conditioned Transformer
+=== 4. Static-Conditioned Transformer
 
 File:
 
@@ -117,7 +126,7 @@ Key characteristics:
 - conditioning acts as a global context shift for all time steps
 - used for `transformer/model_01_static_*`
 
-== 5. Static-Head Transformer
+=== 5. Static-Head Transformer
 
 File:
 
@@ -137,7 +146,7 @@ Key characteristics:
 - cleaner separation between temporal dynamics and static context
 - used for `transformer/model_01_static_head_*`
 
-== 6. Static FiLM-Head Transformer
+=== 6. Static FiLM-Head Transformer
 
 File:
 
@@ -159,7 +168,7 @@ Key characteristics:
 - more expressive than simple concatenation
 - used for `transformer/model_01_static_film_head_*`
 
-== 7. Static FiLM-Head Residual Transformer
+=== 7. Static FiLM-Head Residual Transformer
 
 Trainer:
 
@@ -180,7 +189,7 @@ Key characteristics:
 - combines static FiLM conditioning with residual prediction
 - used for `transformer/model_01_static_film_head_residual_*`
 
-== 8. Architecture Summary
+=== 8. Predictor Summary
 
 #table(
   columns: 4,
@@ -194,7 +203,7 @@ Key characteristics:
   [Static FiLM-Head Residual], [Transformer encoder], [FiLM on final state], [Residual $z_t + hat(Delta z)$],
 )
 
-== 9. Config Families Covered Here
+=== 9. Predictor Config Families Covered Here
 
 The architectures above correspond to the configs currently used in this repository:
 
@@ -205,3 +214,142 @@ The architectures above correspond to the configs currently used in this reposit
 - `configs/wildfire/latent_predictor/transformer/model_01_static_head_*`
 - `configs/wildfire/latent_predictor/transformer/model_01_static_film_head_*`
 - `configs/wildfire/latent_predictor/transformer/model_01_static_film_head_residual_*`
+
+== Part II: Model Two Latent Decoders
+
+=== Shared Decoder Contract
+
+In the ground-truth decoder setting, each sample uses:
+
+- previous image: $x_t$
+- previous embedding: $z_t$
+- target embedding: $z_(t+1)$
+- target image: $x_(t+1)$
+
+The decoder predicts the next image from the previous image together with latent conditioning:
+
+$hat(x)_(t+1) = f_(theta)(x_t, z_t, z_(t+1))$
+
+For the corrected binary-mask runs, the target image is binarized at load time using a target threshold of $0.5$. Reported hard metrics are computed from thresholded decoder probabilities using a prediction threshold of $0.4$.
+
+For end-to-end evaluation, the target latent can be replaced by a predicted latent from Model One. In the stronger predicted-latent evaluation setting used here, both latent inputs to the decoder are predicted:
+
+$hat(x)_(t+1) = f_(theta)(x_t, hat(z)_t, hat(z)_(t+1))$
+
+=== 10. Initial Conditional U-Net Decoder
+
+Files:
+
+- `src/wildfire/model_latent_decoder/conditional_unet_01.py`
+- `src/wildfire/scripts/model2_train/15_train_latent_decoder_conditional_unet.py`
+
+The initial decoder is a bottleneck-conditioned U-Net. The previous image is encoded through a convolutional encoder, the two latent embeddings are projected and fused at the bottleneck, and the result is decoded back to image space with skip connections.
+
+$e = text("Encoder")(x_t)$
+
+$c = phi([z_t | z_(t+1)])$
+
+$b = psi([e_(text("bottleneck")) | c])$
+
+$hat(x)_(t+1) = text("Decoder")(b, text("skips"))$
+
+Key characteristics:
+
+- standard U-Net encoder/decoder with skip connections
+- latent conditioning injected at the bottleneck
+- original early baseline before the corrected binary-mask target path
+
+=== 11. Binary Conditional U-Net Decoder
+
+Files:
+
+- `src/wildfire/model_latent_decoder/conditional_unet_binary_01.py`
+- `src/wildfire/scripts/model2_train/16_train_latent_decoder_conditional_unet_binary.py`
+- `src/wildfire/scripts/model2_train/18_train_latent_decoder_conditional_unet_binary_binarized.py`
+
+This branch adapts the decoder to one-channel binary-mask prediction. The corrected `script 18` path is the real ground-truth decoder baseline because it uses true binary targets rather than two-level grayscale mask values.
+
+$ell = f_(theta)(x_t, z_t, z_(t+1))$
+
+$p_(t+1) = sigma(ell)$
+
+where $ell$ are output logits and $sigma$ is the sigmoid nonlinearity used for evaluation and soft losses.
+
+Key characteristics:
+
+- one-channel input/output decoder
+- bottleneck latent conditioning
+- trained with BCE-with-logits plus soft Dice
+- hard Dice and hard IoU computed after thresholding predicted probabilities
+- reused for both fire-frame and isochrone representations through config changes
+
+=== 12. Predicted-Latent Decoder Evaluation
+
+Files:
+
+- `src/wildfire/scripts/model1_eval/19_export_latent_predictor_embeddings.py`
+- `src/wildfire/scripts/model2_eval/20_eval_latent_decoder_conditional_unet_binary_predicted.py`
+
+This is the end-to-end system benchmark rather than a separate trained decoder family. A selected Model One predictor exports latent sequences, and the best trained decoder checkpoint is evaluated using predicted latent inputs instead of ground-truth future latents.
+
+For the teacher-forced one-step benchmark used here:
+
+- Model One predicts $hat(z)_(t+1)$ from a 5-step latent history
+- decoder evaluation only starts once both $hat(z)_t$ and $hat(z)_(t+1)$ are genuinely predicted
+- this corresponds to $text("target_idx") >= 6$
+
+The decoder contract becomes:
+
+$hat(x)_(t+1) = f_(theta)(x_t, hat(z)_t, hat(z)_(t+1))$
+
+Key characteristics:
+
+- no decoder retraining
+- same decoder weights as the selected ground-truth decoder baseline
+- used as the final end-to-end benchmark
+
+=== 13. Landscape-Conditioned Isochrone Decoder
+
+Files:
+
+- `src/wildfire/model_latent_decoder/conditional_unet_landscape_binary_01.py`
+- `src/wildfire/scripts/model2_train/22_train_latent_decoder_conditional_unet_landscape_binary.py`
+
+This branch augments the binary conditional decoder with spatial landscape information. A per-sequence landscape patch is cropped from a processed raster cube, resized to the image resolution, and concatenated with the previous image at the encoder input.
+
+$x'_t = [x_t | l_t]$
+
+$hat(x)_(t+1) = f_(theta)(x'_t, z_t, z_(t+1))$
+
+The current stabilized version does not use the full raw 8-channel landscape stack. Instead, it uses a normalized continuous subset:
+
+- canopy bulk density (`cbd`)
+- canopy base height (`cbh`)
+- elevation
+
+Normalization statistics are computed on the training split only and reused for validation.
+
+Key characteristics:
+
+- spatial landscape conditioning at image resolution
+- raw and processed landscape paths separated:
+  - raw folder provides `indices.json`
+  - processed folder provides `landscape_channels_chw.npy`
+- current landscape ablation is specific to the isochrone decoder line
+
+=== 14. Decoder Summary
+
+#table(
+  columns: 4,
+  [Variant], [Image Inputs], [Latent Inputs], [Notes],
+  [Initial Conditional U-Net], [Previous image], [$z_t, z_(t+1)$], [Original 3-channel-style baseline],
+  [Binary Conditional U-Net], [Previous image], [$z_t, z_(t+1)$], [Corrected one-channel binary decoder baseline],
+  [Predicted-Latent Evaluation], [Previous image], [$hat(z)_t, hat(z)_(t+1)$], [End-to-end benchmark with fixed decoder checkpoint],
+  [Landscape Isochrone Decoder], [Previous image + landscape patch], [$z_t, z_(t+1)$], [Isochrone decoder ablation with normalized continuous terrain channels],
+)
+
+=== 15. Decoder Config Families Covered Here
+
+- `configs/wildfire/latent_decoder/conditional_unet/model_01_*`
+- `configs/wildfire/latent_decoder/conditional_unet_binary/model_01_*`
+- `configs/wildfire/latent_decoder/conditional_unet_landscape_binary/model_01_*`
